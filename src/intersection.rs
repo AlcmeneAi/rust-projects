@@ -27,7 +27,7 @@ pub struct Lane {
 
 pub struct Intersection {
     pub center: (f32, f32),
-    pub size: f32, // Half-width/height of the intersection area
+    pub size: f32,
     pub lanes: Vec<Lane>,
 }
 

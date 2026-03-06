@@ -14,7 +14,7 @@ impl InputHandler {
             vehicle_requests: VecDeque::new(),
             random_generation_enabled: false,
             last_key_time: std::time::Instant::now(),
-            key_cooldown: std::time::Duration::from_millis(500), // 500ms cooldown between key presses
+            key_cooldown: std::time::Duration::from_millis(500),
         }
     }
 

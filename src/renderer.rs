@@ -1,82 +1,94 @@
-use minifb::Window;
+use sdl2::render::{Canvas, TextureCreator};
+use sdl2::video::Window;
+use sdl2::rect::Rect;
+use sdl2::pixels::Color;
 use crate::vehicle::Vehicle;
 use crate::intersection::Intersection;
 
 pub struct Renderer {
-    buffer: Vec<u32>,
+    canvas: Canvas<Window>,
     width: u32,
     height: u32,
 }
 
 impl Renderer {
-    pub fn new(width: u32, height: u32) -> Result<Self, Box<dyn std::error::Error>> {
-        let buffer = vec![0; (width * height) as usize];
+    pub fn new(
+        canvas: Canvas<Window>,
+        _texture_creator: &TextureCreator<sdl2::video::WindowContext>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Renderer {
-            buffer,
+            canvas,
             width,
             height,
         })
     }
 
     pub fn clear(&mut self) {
-        // Light gray background
-        let bg_color = Self::rgb(240, 240, 240);
-        for pixel in self.buffer.iter_mut() {
-            *pixel = bg_color;
-        }
+        self.canvas.set_draw_color(Color::RGB(240, 240, 240));
+        self.canvas.clear();
     }
 
-    pub fn present(&self, window: &Window) -> Result<(), Box<dyn std::error::Error>> {
-        window.update_with_buffer(&self.buffer, self.width as usize, self.height as usize)?;
-        Ok(())
+    pub fn present(&mut self) {
+        self.canvas.present();
     }
 
     pub fn draw_intersection(&mut self, intersection: &Intersection) -> Result<(), Box<dyn std::error::Error>> {
-        // Draw intersection as gray square
         let size = (intersection.size * 2.0) as u32;
         let x = (intersection.center.0 - intersection.size) as i32;
         let y = (intersection.center.1 - intersection.size) as i32;
 
-        let gray = Self::rgb(200, 200, 200);
-        self.fill_rect(x, y, size, size, gray);
+        self.canvas.set_draw_color(Color::RGB(200, 200, 200));
+        let rect = Rect::new(x, y, size, size);
+        self.canvas.fill_rect(rect)?;
 
-        // Draw lane markings
-        let white = Self::rgb(255, 255, 255);
+        self.canvas.set_draw_color(Color::RGB(255, 255, 255));
         let lane_width = 40;
-
-        // Horizontal lanes
         for i in 0..3 {
-            let lane_y = (y + (i as f32 * lane_width as f32) as i32) as u32;
-            self.draw_rect(x as u32, lane_y, size, lane_width, white);
+            let lane_y = (intersection.center.1 - intersection.size + (i as f32) * lane_width as f32) as i32;
+            let rect = Rect::new(x, lane_y, size, lane_width as u32);
+            self.canvas.draw_rect(rect)?;
         }
 
-        // Vertical lanes
         for i in 0..3 {
-            let lane_x = (x + (i as f32 * lane_width as f32) as i32) as u32;
-            self.draw_rect(lane_x, y as u32, lane_width, size, white);
+            let lane_x = (intersection.center.0 - intersection.size + (i as f32) * lane_width as f32) as i32;
+            let rect = Rect::new(lane_x, y, lane_width as u32, size);
+            self.canvas.draw_rect(rect)?;
         }
 
-        // Draw roads
-        let dark = Self::rgb(50, 50, 50);
+        self.canvas.set_draw_color(Color::RGB(50, 50, 50));
+        let north_rect = Rect::new(
+            (intersection.center.0 - intersection.size / 2.0) as i32,
+            0,
+            (intersection.size) as u32,
+            (intersection.center.1 - intersection.size) as u32,
+        );
+        self.canvas.fill_rect(north_rect)?;
 
-        // North road
-        let north_width = (intersection.size) as u32;
-        let north_height = (intersection.center.1 - intersection.size) as u32;
-        self.fill_rect((intersection.center.0 - intersection.size / 2.0) as i32, 0, north_width, north_height, dark);
+        let south_rect = Rect::new(
+            (intersection.center.0 - intersection.size / 2.0) as i32,
+            (intersection.center.1 + intersection.size) as i32,
+            (intersection.size) as u32,
+            (self.height as f32 - intersection.center.1 - intersection.size) as u32,
+        );
+        self.canvas.fill_rect(south_rect)?;
 
-        // South road
-        let south_y = (intersection.center.1 + intersection.size) as i32;
-        let south_height = (self.height as f32 - intersection.center.1 - intersection.size) as u32;
-        self.fill_rect((intersection.center.0 - intersection.size / 2.0) as i32, south_y, north_width, south_height, dark);
+        let east_rect = Rect::new(
+            (intersection.center.0 + intersection.size) as i32,
+            (intersection.center.1 - intersection.size / 2.0) as i32,
+            (self.width as f32 - intersection.center.0 - intersection.size) as u32,
+            (intersection.size) as u32,
+        );
+        self.canvas.fill_rect(east_rect)?;
 
-        // East road
-        let east_x = (intersection.center.0 + intersection.size) as i32;
-        let east_width = (self.width as f32 - intersection.center.0 - intersection.size) as u32;
-        self.fill_rect(east_x, (intersection.center.1 - intersection.size / 2.0) as i32, east_width, (intersection.size) as u32, dark);
-
-        // West road
-        let west_width = (intersection.center.0 - intersection.size) as u32;
-        self.fill_rect(0, (intersection.center.1 - intersection.size / 2.0) as i32, west_width, (intersection.size) as u32, dark);
+        let west_rect = Rect::new(
+            0,
+            (intersection.center.1 - intersection.size / 2.0) as i32,
+            (intersection.center.0 - intersection.size) as u32,
+            (intersection.size) as u32,
+        );
+        self.canvas.fill_rect(west_rect)?;
 
         Ok(())
     }
@@ -85,62 +97,20 @@ impl Renderer {
         let pos = vehicle.get_position();
         let x = pos.0 as i32;
         let y = pos.1 as i32;
-        let size = 20u32;
+        let size = 20;
 
         let color = match vehicle.get_id() % 5 {
-            0 => Self::rgb(255, 0, 0),    // Red
-            1 => Self::rgb(0, 0, 255),    // Blue
-            2 => Self::rgb(0, 255, 0),    // Green
-            3 => Self::rgb(255, 255, 0),  // Yellow
-            _ => Self::rgb(255, 0, 255),  // Magenta
+            0 => Color::RGB(255, 0, 0),
+            1 => Color::RGB(0, 0, 255),
+            2 => Color::RGB(0, 255, 0),
+            3 => Color::RGB(255, 255, 0),
+            _ => Color::RGB(255, 0, 255),
         };
 
-        self.fill_rect(x - (size / 2) as i32, y - (size / 2) as i32, size, size, color);
+        self.canvas.set_draw_color(color);
+        let rect = Rect::new(x - size / 2, y - size / 2, size as u32, size as u32);
+        self.canvas.fill_rect(rect)?;
 
         Ok(())
-    }
-
-    // Helper functions
-    fn rgb(r: u32, g: u32, b: u32) -> u32 {
-        (r << 16) | (g << 8) | b
-    }
-
-    fn fill_rect(&mut self, x: i32, y: i32, width: u32, height: u32, color: u32) {
-        for dy in 0..height {
-            for dx in 0..width {
-                let px = x + dx as i32;
-                let py = y + dy as i32;
-                if px >= 0 && px < self.width as i32 && py >= 0 && py < self.height as i32 {
-                    let idx = ((py as u32) * self.width + (px as u32)) as usize;
-                    if idx < self.buffer.len() {
-                        self.buffer[idx] = color;
-                    }
-                }
-            }
-        }
-    }
-
-    fn draw_rect(&mut self, x: u32, y: u32, width: u32, height: u32, color: u32) {
-        // Draw outline
-        for i in 0..width {
-            let idx_top = (y * self.width + x + i) as usize;
-            let idx_bottom = ((y + height - 1) * self.width + x + i) as usize;
-            if idx_top < self.buffer.len() {
-                self.buffer[idx_top] = color;
-            }
-            if idx_bottom < self.buffer.len() {
-                self.buffer[idx_bottom] = color;
-            }
-        }
-        for i in 0..height {
-            let idx_left = ((y + i) * self.width + x) as usize;
-            let idx_right = ((y + i) * self.width + x + width - 1) as usize;
-            if idx_left < self.buffer.len() {
-                self.buffer[idx_left] = color;
-            }
-            if idx_right < self.buffer.len() {
-                self.buffer[idx_right] = color;
-            }
-        }
     }
 }

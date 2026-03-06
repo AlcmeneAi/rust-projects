@@ -25,7 +25,6 @@ impl Statistics {
 
     pub fn record_vehicle(&mut self, vehicle: &Vehicle) {
         self.vehicle_count += 1;
-        
         let velocity = vehicle.get_velocity();
         if velocity > self.max_velocity {
             self.max_velocity = velocity;
@@ -33,7 +32,6 @@ impl Statistics {
         if velocity < self.min_velocity {
             self.min_velocity = velocity;
         }
-
         let time = vehicle.get_time_in_intersection();
         if time > self.max_time {
             self.max_time = time;
@@ -41,7 +39,6 @@ impl Statistics {
         if time < self.min_time || self.first_vehicle {
             self.min_time = time;
         }
-
         self.first_vehicle = false;
     }
 
