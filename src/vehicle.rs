@@ -452,6 +452,11 @@ impl Vehicle {
             distance_traveled_total: self.distance_traveled,
         }
     }
+
+    #[cfg(test)]
+    pub fn set_position(&mut self, x: f32, y: f32) {
+        self.position = (x, y);
+    }
 }
 
 /// Summary of vehicle physics data through intersection
@@ -464,4 +469,17 @@ pub struct PhysicsSummary {
     pub velocity_pixels_per_frame: f32,    // current velocity
     pub average_velocity_level: &'static str,
     pub distance_traveled_total: f32,      // total distance from start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::intersection::Direction;
+
+    #[test]
+    fn set_position_changes_vehicle_position() {
+        let mut v = Vehicle::new(0, Direction::North, Route::Straight);
+        v.set_position(100.0, 200.0);
+        assert_eq!(v.get_position(), (100.0, 200.0));
+    }
 }
