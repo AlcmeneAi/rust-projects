@@ -232,4 +232,66 @@ mod tests {
         let mut stats = Statistics::new();
         check_collisions_and_apply_strategy(&mut vehicles, &intersection, &mut stats);
     }
+
+    // Geometry reference:
+    // Intersection center: (700.0, 450.0), size: 200.0, padding: INTERSECTION_PADDING=200.0
+    // Near zone: |x - 700| < 400 AND |y - 450| < 400  → for x=700: y in (50, 850)
+    // In-intersection: |x - 700| < 200 AND |y - 450| < 200
+    // Far zone: |y - 450| >= 400 → for x=700: y <= 50 or y >= 850
+
+    #[test]
+    fn vehicle_far_from_intersection_gets_fast_velocity() {
+        // y=1000 → |1000 - 450| = 550 > 400 → far zone
+        let mut vehicle = Vehicle::new(0, Direction::North, Route::Straight);
+        vehicle.set_position(700.0, 1000.0);
+        let mut vehicles = vec![vehicle];
+        let mut stats = Statistics::new();
+        check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Fast);
+    }
+
+    #[test]
+    fn vehicle_in_intersection_gets_slow_velocity() {
+        // (700, 450) is the center — inside on both axes (|0| < 200)
+        let mut vehicle = Vehicle::new(0, Direction::North, Route::Straight);
+        vehicle.set_position(700.0, 450.0);
+        let mut vehicles = vec![vehicle];
+        let mut stats = Statistics::new();
+        check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Slow);
+    }
+
+    #[test]
+    fn vehicle_near_intersection_no_conflicts_gets_normal_velocity() {
+        // y=700 → |700 - 450| = 250 < 400 (near zone) AND 250 > 200 (not inside)
+        let mut vehicle = Vehicle::new(0, Direction::North, Route::Straight);
+        vehicle.set_position(700.0, 700.0);
+        let mut vehicles = vec![vehicle];
+        let mut stats = Statistics::new();
+        check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Normal);
+    }
+
+    #[test]
+    fn safety_distance_reduction_not_overridden_by_baseline_pass() {
+        // Two North/Straight vehicles (same lane=1, since Straight → assigned_lane=1)
+        // Leader at y=870 (far: |870-450|=420 > 400 → outside near zone)
+        // Follower at y=920 (far: |920-450|=470 > 400 → outside near zone)
+        // Gap = 50px < SAFETY_DISTANCE_FAST (100.0) → safety distance enforcement must reduce follower
+        //
+        // BUG (current code): baseline runs LAST → resets follower to Fast after safety pass ran
+        // FIX (Task 4):        baseline runs FIRST → safety pass reduces follower from Fast to Normal
+        let mut leader = Vehicle::new(0, Direction::North, Route::Straight);
+        let mut follower = Vehicle::new(1, Direction::North, Route::Straight);
+        leader.set_position(700.0, 870.0);   // ahead (North moves toward smaller y, so leader has smaller y)
+        follower.set_position(700.0, 920.0); // 50px behind leader
+        let mut vehicles = vec![leader, follower];
+        let mut stats = Statistics::new();
+        check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
+        assert_eq!(
+            vehicles[1].get_velocity_level(),
+            VelocityLevel::Normal,
+            "follower within safety distance of leader must be reduced from Fast to Normal"
+        );
+    }
 }
