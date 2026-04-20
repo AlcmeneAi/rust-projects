@@ -298,4 +298,21 @@ mod tests {
             "follower within safety distance of leader must be reduced from Fast to Normal"
         );
     }
+
+    #[test]
+    fn two_conflicting_vehicles_near_intersection_both_get_slow() {
+        // North/Straight and East/Straight have crossing paths (are_paths_intersecting_at_center).
+        // Both near intersection → Pass 2 detects conflict → both set to Slow.
+        let mut north = Vehicle::new(0, Direction::North, Route::Straight);
+        let mut east = Vehicle::new(1, Direction::East, Route::Straight);
+        // y=700: |700-450|=250 < 400 → near zone; |250| > 200 → not in intersection
+        north.set_position(700.0, 700.0);
+        // x=400: |400-700|=300 < 400 → near zone; |300| > 200 → not in intersection
+        east.set_position(400.0, 450.0);
+        let mut vehicles = vec![north, east];
+        let mut stats = Statistics::new();
+        check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Slow, "North vehicle should be Slow due to conflict");
+        assert_eq!(vehicles[1].get_velocity_level(), VelocityLevel::Slow, "East vehicle should be Slow due to conflict");
+    }
 }
