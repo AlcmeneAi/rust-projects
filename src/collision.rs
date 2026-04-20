@@ -235,9 +235,9 @@ mod tests {
 
     // Geometry reference:
     // Intersection center: (700.0, 450.0), size: 200.0, padding: INTERSECTION_PADDING=200.0
-    // Near zone: |x - 700| < 400 AND |y - 450| < 400  → for x=700: y in (50, 850)
+    // Near zone: |x - 700| < 400 AND |y - 450| < 400  → for x=700: y in (50, 850) exclusive
     // In-intersection: |x - 700| < 200 AND |y - 450| < 200
-    // Far zone: |y - 450| >= 400 → for x=700: y <= 50 or y >= 850
+    // Far zone: |y - 450| >= 400 → for x=700: y <= 50 or y >= 850 (boundary is FAR)
 
     #[test]
     fn vehicle_far_from_intersection_gets_fast_velocity() {
@@ -262,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn vehicle_near_intersection_no_conflicts_gets_normal_velocity() {
+    fn single_vehicle_near_intersection_gets_normal_velocity() {
         // y=700 → |700 - 450| = 250 < 400 (near zone) AND 250 > 200 (not inside)
         let mut vehicle = Vehicle::new(0, Direction::North, Route::Straight);
         vehicle.set_position(700.0, 700.0);
@@ -281,6 +281,8 @@ mod tests {
         //
         // BUG (current code): baseline runs LAST → resets follower to Fast after safety pass ran
         // FIX (Task 4):        baseline runs FIRST → safety pass reduces follower from Fast to Normal
+        // Vehicle::new initializes velocity_level to Normal, so required_safety_distance=70.0 during
+        // the current (buggy) pass 3 — gap 50px < 70px triggers reduction, then baseline overrides to Fast.
         let mut leader = Vehicle::new(0, Direction::North, Route::Straight);
         let mut follower = Vehicle::new(1, Direction::North, Route::Straight);
         leader.set_position(700.0, 870.0);   // ahead (North moves toward smaller y, so leader has smaller y)
