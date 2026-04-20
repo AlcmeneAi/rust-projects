@@ -12,7 +12,45 @@ pub fn check_collisions_and_apply_strategy(
     intersection: &Intersection,
     statistics: &mut Statistics,
 ) {
-    // First pass: detect all potential collisions based on actual paths through intersection
+    // Pass 1: set baseline velocity by intersection zone (far→Fast, near→Normal, in→Slow)
+    for i in 0..vehicles.len() {
+        let pos = vehicles[i].get_position();
+        let dir = vehicles[i].get_direction();
+        let route = vehicles[i].get_route();
+
+        let in_intersection = intersection.contains_point(pos);
+        let near_intersection = is_in_or_near_intersection(pos, intersection, INTERSECTION_PADDING);
+
+        if in_intersection {
+            vehicles[i].set_velocity_level(VelocityLevel::Slow);
+        } else if near_intersection {
+            let mut has_conflicts = false;
+            for j in 0..vehicles.len() {
+                if i != j {
+                    let other_pos = vehicles[j].get_position();
+                    let other_dir = vehicles[j].get_direction();
+                    let other_route = vehicles[j].get_route();
+
+                    if is_in_or_near_intersection(other_pos, intersection, INTERSECTION_PADDING) {
+                        if will_paths_conflict(dir, route, other_dir, other_route) {
+                            has_conflicts = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if has_conflicts {
+                vehicles[i].set_velocity_level(VelocityLevel::Slow);
+            } else {
+                vehicles[i].set_velocity_level(VelocityLevel::Normal);
+            }
+        } else {
+            vehicles[i].set_velocity_level(VelocityLevel::Fast);
+        }
+    }
+
+    // Pass 2: reduce velocity for vehicles with conflicting intersection paths
     let mut collision_risks = Vec::new();
     for i in 0..vehicles.len() {
         for j in (i + 1)..vehicles.len() {
@@ -39,7 +77,6 @@ pub fn check_collisions_and_apply_strategy(
         }
     }
 
-    // Apply velocity level control for collision avoidance
     for (i, j, _distance, is_conflicting) in collision_risks {
         if is_conflicting {
             vehicles[i].set_velocity_level(VelocityLevel::Slow);
@@ -66,7 +103,9 @@ pub fn check_collisions_and_apply_strategy(
         }
     }
 
-    // Third pass: enforce safety distance on same lane/direction
+    // Pass 3: enforce safety distance — reduce follower velocity when too close to leader.
+    // v_i_level is snapshotted after passes 1+2, so required_safety_distance reflects
+    // the velocity already set by zone and conflict checks (never a stale initial value).
     for i in 0..vehicles.len() {
         let v_i_pos = vehicles[i].get_position();
         let v_i_dir = vehicles[i].get_direction();
@@ -111,44 +150,6 @@ pub fn check_collisions_and_apply_strategy(
                     statistics.record_close_call();
                 }
             }
-        }
-    }
-
-    // Second pass: apply velocity based on traffic conditions and intersection state
-    for i in 0..vehicles.len() {
-        let pos = vehicles[i].get_position();
-        let dir = vehicles[i].get_direction();
-        let route = vehicles[i].get_route();
-
-        let in_intersection = intersection.contains_point(pos);
-        let near_intersection = is_in_or_near_intersection(pos, intersection, INTERSECTION_PADDING);
-
-        if in_intersection {
-            vehicles[i].set_velocity_level(VelocityLevel::Slow);
-        } else if near_intersection {
-            let mut has_conflicts = false;
-            for j in 0..vehicles.len() {
-                if i != j {
-                    let other_pos = vehicles[j].get_position();
-                    let other_dir = vehicles[j].get_direction();
-                    let other_route = vehicles[j].get_route();
-
-                    if is_in_or_near_intersection(other_pos, intersection, INTERSECTION_PADDING) {
-                        if will_paths_conflict(dir, route, other_dir, other_route) {
-                            has_conflicts = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if has_conflicts {
-                vehicles[i].set_velocity_level(VelocityLevel::Slow);
-            } else {
-                vehicles[i].set_velocity_level(VelocityLevel::Normal);
-            }
-        } else {
-            vehicles[i].set_velocity_level(VelocityLevel::Fast);
         }
     }
 }
