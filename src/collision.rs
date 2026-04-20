@@ -50,7 +50,8 @@ pub fn check_collisions_and_apply_strategy(
         }
     }
 
-    // Pass 2: reduce velocity for vehicles with conflicting intersection paths
+    // Pass 2: reduce velocity for at-risk pairs — Slow both vehicles if paths conflict;
+    //         damp relative velocity for non-conflicting pairs that are close together.
     let mut collision_risks = Vec::new();
     for i in 0..vehicles.len() {
         for j in (i + 1)..vehicles.len() {
@@ -104,8 +105,9 @@ pub fn check_collisions_and_apply_strategy(
     }
 
     // Pass 3: enforce safety distance — reduce follower velocity when too close to leader.
-    // v_i_level is snapshotted after passes 1+2, so required_safety_distance reflects
-    // the velocity already set by zone and conflict checks (never a stale initial value).
+    // v_i_level is snapshotted at the start of each outer iteration (after passes 1+2),
+    // so required_safety_distance reflects the velocity set by zone and conflict checks.
+    // A vehicle reduced in an earlier iteration will use its already-reduced level here.
     for i in 0..vehicles.len() {
         let v_i_pos = vehicles[i].get_position();
         let v_i_dir = vehicles[i].get_direction();
@@ -140,7 +142,6 @@ pub fn check_collisions_and_apply_strategy(
                 if is_ahead && distance < required_safety_distance {
                     let v_j_level = vehicles[j].get_velocity_level();
                     let new_level = match (v_i_level, v_j_level) {
-                        (VelocityLevel::Fast, VelocityLevel::Fast) => VelocityLevel::Normal,
                         (VelocityLevel::Fast, _) => VelocityLevel::Normal,
                         (VelocityLevel::Normal, VelocityLevel::Slow) => VelocityLevel::Slow,
                         (VelocityLevel::Normal, _) => VelocityLevel::Normal,
