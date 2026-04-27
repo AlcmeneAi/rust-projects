@@ -114,21 +114,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (i, vehicle) in vehicles.iter_mut().enumerate() {
             vehicle.update(dt);
             
-            // Track intersection entry
-            let in_intersection = intersection.contains_point(vehicle.get_position());
-            if in_intersection && !vehicle.has_entered_intersection() {
+            // Track intersection entry: timer starts when the smart intersection
+            // algorithm first detects the vehicle (near-zone entry), per the spec.
+            if intersection.is_near_or_in(vehicle.get_position(), 50.0)
+                && !vehicle.has_entered_intersection()
+            {
                 vehicle.mark_intersection_entry(total_time);
             }
-            
+
             // Apply route turn when vehicle reaches intersection center
             if vehicle.should_apply_route_turn(intersection.center, 50.0) {
                 vehicle.apply_route_turn();
-            }
-            
-            // Record statistics when vehicle leaves intersection
-            if vehicle.has_left_intersection(&intersection) && !vehicle.has_exited_intersection() {
-                vehicle.mark_intersection_exit(total_time);
-                statistics.record_vehicle(vehicle);
             }
             
             // Remove vehicle when it's completely off-screen
@@ -140,7 +136,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Timer ends when the vehicle is removed from the canvas (off-screen), per the spec.
         for i in vehicles_to_remove.iter().rev() {
+            if vehicles[*i].has_entered_intersection() && !vehicles[*i].has_exited_intersection() {
+                vehicles[*i].mark_intersection_exit(total_time);
+                statistics.record_vehicle(&vehicles[*i]);
+            }
             vehicles.remove(*i);
         }
 

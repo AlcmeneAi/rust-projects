@@ -28,7 +28,9 @@ impl Statistics {
 
     pub fn record_vehicle(&mut self, vehicle: &Vehicle) {
         self.vehicle_count += 1;
-        let velocity = vehicle.get_velocity();
+        // Use physics velocity (distance / time) as required by the spec,
+        // not the discrete velocity level at the moment of exit.
+        let velocity = vehicle.get_physics_velocity();
         if velocity > self.max_velocity {
             self.max_velocity = velocity;
         }
