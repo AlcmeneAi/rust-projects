@@ -25,13 +25,6 @@ impl VelocityLevel {
         }
     }
 
-    pub fn description(&self) -> &'static str {
-        match self {
-            VelocityLevel::Stopped => "Stopped (0 px/f)",
-            VelocityLevel::Normal => "Normal (100 px/f)",
-            VelocityLevel::Fast => "Fast (160 px/f)",
-        }
-    }
 }
 
 impl Route {
@@ -256,18 +249,6 @@ impl Vehicle {
         }
     }
 
-    pub fn set_entered_intersection(&mut self) {
-        if !self.entered_intersection {
-            self.entered_intersection = true;
-        }
-    }
-
-    pub fn has_left_intersection(&self, intersection: &crate::intersection::Intersection) -> bool {
-        !intersection.contains_point(self.position)
-            && self.entered_intersection
-            && self.time_in_intersection > 0.1
-    }
-
     pub fn get_position(&self) -> (f32, f32) {
         self.position
     }
@@ -299,32 +280,6 @@ impl Vehicle {
         self.velocity = level.to_pixels_per_frame();
     }
 
-    /// Legacy method: Set velocity directly (will be converted to nearest velocity level)
-    pub fn set_velocity(&mut self, vel: f32) {
-        if vel <= 0.0 {
-            self.set_velocity_level(VelocityLevel::Stopped);
-            return;
-        }
-        // Midpoint between Normal (100) and Fast (160) is 130
-        let level = if vel.min(200.0) < 130.0 {
-            VelocityLevel::Normal
-        } else {
-            VelocityLevel::Fast
-        };
-        self.set_velocity_level(level);
-    }
-
-    /// Legacy method: Reduce velocity by a factor (deprecated in favor of set_velocity_level)
-    pub fn reduce_velocity(&mut self, factor: f32) {
-        // Apply factor to current velocity level
-        let new_velocity = self.velocity * factor;
-        self.set_velocity(new_velocity);
-    }
-
-    pub fn get_distance_traveled(&self) -> f32 {
-        self.distance_traveled
-    }
-
     pub fn get_time_in_intersection(&self) -> f32 {
         self.time_in_intersection
     }
@@ -337,17 +292,8 @@ impl Vehicle {
         self.animation.get_angle()
     }
 
-    pub fn is_turning(&self) -> bool {
-        self.animation.is_turning
-    }
-
     pub fn get_assigned_lane(&self) -> u32 {
         self.assigned_lane
-    }
-
-    pub fn can_change_route(&self) -> bool {
-        // Vehicles cannot change their route once assigned
-        false
     }
 
     pub fn should_apply_route_turn(&self, intersection_center: (f32, f32), _threshold: f32) -> bool {
@@ -483,22 +429,6 @@ impl Vehicle {
         }
     }
 
-    /// Get the time spent in the intersection (seconds)
-    pub fn get_intersection_time(&self) -> f32 {
-        if self.entered_intersection && self.intersection_exit_time > 0.0 {
-            self.intersection_exit_time - self.intersection_entry_time
-        } else if self.entered_intersection {
-            self.time_in_intersection
-        } else {
-            0.0
-        }
-    }
-
-    /// Get the distance traveled in the intersection (pixels)
-    pub fn get_intersection_distance(&self) -> f32 {
-        self.intersection_distance
-    }
-
     /// Get the calculated physics velocity (distance / time) in pixels per second
     pub fn get_physics_velocity(&self) -> f32 {
         self.intersection_physics_velocity
@@ -514,39 +444,10 @@ impl Vehicle {
         self.entered_intersection && self.intersection_exit_time > 0.0
     }
 
-    /// Get a summary of physics data for the vehicle
-    pub fn get_physics_summary(&self) -> PhysicsSummary {
-        PhysicsSummary {
-            vehicle_id: self.id,
-            time_in_intersection: self.get_intersection_time(),
-            distance_in_intersection: self.intersection_distance,
-            velocity_pixels_per_second: self.intersection_physics_velocity,
-            velocity_pixels_per_frame: self.velocity,
-            average_velocity_level: match self.velocity_level {
-                VelocityLevel::Stopped => "Stopped (0 px/f)",
-                VelocityLevel::Normal => "Normal (100 px/f)",
-                VelocityLevel::Fast => "Fast (160 px/f)",
-            },
-            distance_traveled_total: self.distance_traveled,
-        }
-    }
-
     #[cfg(test)]
     pub fn set_position(&mut self, x: f32, y: f32) {
         self.position = (x, y);
     }
-}
-
-/// Summary of vehicle physics data through intersection
-#[derive(Clone, Debug)]
-pub struct PhysicsSummary {
-    pub vehicle_id: u32,
-    pub time_in_intersection: f32,         // seconds
-    pub distance_in_intersection: f32,     // pixels
-    pub velocity_pixels_per_second: f32,   // calculated: distance / time
-    pub velocity_pixels_per_frame: f32,    // current velocity
-    pub average_velocity_level: &'static str,
-    pub distance_traveled_total: f32,      // total distance from start
 }
 
 #[cfg(test)]

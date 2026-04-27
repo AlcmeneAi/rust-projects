@@ -1,5 +1,4 @@
 use crate::intersection::Direction;
-use crate::vehicle::Route;
 
 /// Represents the animation state of a vehicle
 #[derive(Clone, Debug)]
@@ -62,20 +61,9 @@ impl AnimationState {
         }
     }
 
-    /// Set a direction based on current direction and route
-    pub fn set_route_direction(&mut self, current_direction: Direction, route: Route) {
-        let new_direction = apply_route(current_direction, route);
-        self.set_direction(new_direction);
-    }
-
     /// Get the current rotation angle
     pub fn get_angle(&self) -> f32 {
         self.current_angle
-    }
-
-    /// Check if rotation animation is complete
-    pub fn is_rotation_complete(&self) -> bool {
-        !self.is_turning
     }
 }
 
@@ -90,40 +78,39 @@ fn direction_to_angle(direction: Direction) -> f32 {
     }
 }
 
-/// Convert an angle to a Direction (for discrete directions)
-pub fn angle_to_direction(angle: f32) -> Direction {
-    let normalized = angle.rem_euclid(360.0);
-    match normalized as i32 {
-        0..=45 | 315..=360 => Direction::North,
-        46..=135 => Direction::East,
-        136..=225 => Direction::South,
-        226..=314 => Direction::West,
-        _ => Direction::North,
-    }
-}
-
-/// Apply a route turn to a direction and return the new direction
-pub fn apply_route(direction: Direction, route: Route) -> Direction {
-    match route {
-        Route::Straight => direction,
-        Route::Right => match direction {
-            Direction::North => Direction::East,
-            Direction::East => Direction::South,
-            Direction::South => Direction::West,
-            Direction::West => Direction::North,
-        },
-        Route::Left => match direction {
-            Direction::North => Direction::West,
-            Direction::West => Direction::South,
-            Direction::South => Direction::East,
-            Direction::East => Direction::North,
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vehicle::Route;
+
+    fn angle_to_direction(angle: f32) -> Direction {
+        let normalized = angle.rem_euclid(360.0);
+        match normalized as i32 {
+            0..=45 | 315..=360 => Direction::North,
+            46..=135 => Direction::East,
+            136..=225 => Direction::South,
+            226..=314 => Direction::West,
+            _ => Direction::North,
+        }
+    }
+
+    fn apply_route(direction: Direction, route: Route) -> Direction {
+        match route {
+            Route::Straight => direction,
+            Route::Right => match direction {
+                Direction::North => Direction::East,
+                Direction::East => Direction::South,
+                Direction::South => Direction::West,
+                Direction::West => Direction::North,
+            },
+            Route::Left => match direction {
+                Direction::North => Direction::West,
+                Direction::West => Direction::South,
+                Direction::South => Direction::East,
+                Direction::East => Direction::North,
+            },
+        }
+    }
 
     #[test]
     fn test_direction_to_angle() {

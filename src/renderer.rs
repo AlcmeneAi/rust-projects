@@ -4,15 +4,11 @@ use sdl2::rect::Rect;
 use sdl2::pixels::Color;
 use crate::vehicle::Vehicle;
 use crate::intersection::Intersection;
-use crate::intersection::Direction;
-use std::collections::HashMap;
 
 pub struct Renderer {
     canvas: Canvas<Window>,
     width: u32,
     height: u32,
-    // Vehicle sprite cache (color_id -> texture)
-    vehicle_sprites: HashMap<u32, (u32, u32)>, // Store sprite dimensions
 }
 
 const LANE_WIDTH: i32 = 50;
@@ -31,7 +27,6 @@ impl Renderer {
             canvas,
             width,
             height,
-            vehicle_sprites: HashMap::new(),
         })
     }
 
@@ -74,8 +69,6 @@ impl Renderer {
     fn draw_road_north(&mut self, center_x: i32, center_y: i32, size: i32) -> Result<(), Box<dyn std::error::Error>> {
         let road_width = (LANE_WIDTH * LANE_COUNT as i32) as u32;
         let road_start_x = center_x - (road_width as i32 / 2);
-        let road_end_y = center_y - size;
-
         // Draw road surface
         self.canvas.set_draw_color(Color::RGB(50, 50, 50));
         let road_rect = Rect::new(road_start_x, 0, road_width, (center_y - size) as u32);
@@ -195,7 +188,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn draw_lanes_vertical(&mut self, start_x: i32, start_y: i32, width: i32, height: i32, _with_labels: bool) -> Result<(), Box<dyn std::error::Error>> {
+    fn draw_lanes_vertical(&mut self, start_x: i32, start_y: i32, _width: i32, height: i32, _with_labels: bool) -> Result<(), Box<dyn std::error::Error>> {
         for i in 1..LANE_COUNT {
             let line_x = start_x + (i as i32) * LANE_WIDTH;
             if i == LANE_COUNT / 2 {
@@ -211,7 +204,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn draw_lanes_horizontal(&mut self, start_x: i32, start_y: i32, width: i32, height: i32, _with_labels: bool) -> Result<(), Box<dyn std::error::Error>> {
+    fn draw_lanes_horizontal(&mut self, start_x: i32, start_y: i32, width: i32, _height: i32, _with_labels: bool) -> Result<(), Box<dyn std::error::Error>> {
         for i in 1..LANE_COUNT {
             let line_y = start_y + (i as i32) * LANE_WIDTH;
             if i == LANE_COUNT / 2 {
@@ -467,7 +460,6 @@ impl Renderer {
         let ind3_x = (front_x + indicator_size * 0.7 * sin_a) as i32;
         let ind3_y = (front_y - indicator_size * 0.7 * cos_a) as i32;
 
-        let indicator_color = Color::RGB(255, 255, 255);
         self.draw_line_simple(ind1_x, ind1_y, ind2_x, ind2_y)?;
         self.draw_line_simple(ind1_x, ind1_y, ind3_x, ind3_y)?;
 

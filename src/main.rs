@@ -3,7 +3,6 @@ mod intersection;
 mod renderer;
 mod input;
 mod statistics;
-mod physics;
 mod animation;
 mod collision;
 
