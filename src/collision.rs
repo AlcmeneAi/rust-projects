@@ -3,13 +3,18 @@ use crate::intersection::{Intersection, Direction};
 use crate::statistics::Statistics;
 use std::collections::HashSet;
 
-const SAFETY_DISTANCE_FAST: f32 = 120.0;  // beyond this → Fast
-const SAFETY_DISTANCE_NORMAL: f32 = 80.0;  // within this → Normal; below STOP_DISTANCE → Stopped
-const SAFETY_DISTANCE_STOP: f32 = 50.0;   // must exceed vehicle body length (~30px)
-// Near zone = intersection boundary + this padding.  Keep small so vehicles only
-// enter the wait zone when genuinely close to the intersection.
+const SAFETY_DISTANCE_FAST: f32 = 120.0;  // same-lane following: beyond this → Fast
+const SAFETY_DISTANCE_STOP: f32 = 50.0;   // same-lane following: below this → Stopped (~vehicle body)
+// Planning horizon for the ATW algorithm (pixels beyond intersection boundary).
+const ETA_LOOKAHEAD: f32 = 500.0;
+// Safety buffer added to both ends of each vehicle's crossing time window (seconds).
+const WINDOW_BUFFER_SECS: f32 = 0.3;
+// Distance from the intersection entry edge where a yielding vehicle must fully stop.
+// Vehicles with a detected conflict decelerate to Normal beyond this line and halt here.
+const STOP_LINE_DISTANCE: f32 = 60.0;
+// Near zone used for close-call counting in Pass 2.
 const INTERSECTION_PADDING: f32 = 50.0;
-// Distance below which two crossing vehicles inside the intersection count as a close call
+// Distance below which two crossing vehicles inside the intersection count as a close call.
 const CLOSE_CALL_DISTANCE: f32 = 60.0;
 
 pub fn check_collisions_and_apply_strategy(
@@ -21,81 +26,119 @@ pub fn check_collisions_and_apply_strategy(
     // prints compare against the true start-of-frame state, not Pass-1's overwrite.
     let prev_levels: Vec<VelocityLevel> = vehicles.iter().map(|v| v.get_velocity_level()).collect();
 
-    // Pass 1: set baseline velocity by intersection zone.
-    // - In intersection: Normal (caution speed)
-    // - Near intersection with a conflicting vehicle ALREADY IN the intersection: Stopped
-    // - Near intersection with conflict but no vehicle inside: Normal
-    // - Near intersection, no conflict: Normal
-    // - Far from intersection: Fast
+    // Pass 1 — Arrival-Time-Window (ATW) velocity control:
+    // Instead of stopping every vehicle that shares a near-zone with a conflicting peer,
+    // we only stop a vehicle when its crossing time window OVERLAPS with a conflicting
+    // vehicle’s window.  Non-overlapping pairs proceed at full speed with zero delay.
+    //
+    // For each approaching vehicle:
+    //   eta_entry = dist_to_entry_edge / velocity
+    //   window    = [eta_entry − BUFFER, eta_entry + crossing_distance/vel + BUFFER]
+    //
+    // When two conflicting paths have overlapping windows the farther vehicle (larger eta)
+    // must stop.  Tiebreak: lower ID has priority.
     for i in 0..vehicles.len() {
-        let pos = vehicles[i].get_position();
-        let dir = vehicles[i].get_direction();
-        let route = vehicles[i].get_route();
-        let exited = vehicles[i].is_route_applied();
+        let pos_i    = vehicles[i].get_position();
+        let dir_i    = vehicles[i].get_direction();
+        let route_i  = vehicles[i].get_route();
+        let exited_i = vehicles[i].is_route_applied();
+        let in_isect_i   = intersection.contains_point(pos_i);
+        let in_lookahead = is_in_or_near_intersection(pos_i, intersection, ETA_LOOKAHEAD);
 
-        let in_intersection = intersection.contains_point(pos);
-        let near_intersection = is_in_or_near_intersection(pos, intersection, INTERSECTION_PADDING);
+        // Outside planning horizon or already completed turn → free speed.
+        if !in_lookahead || exited_i {
+            vehicles[i].set_velocity_level(VelocityLevel::Fast);
+            continue;
+        }
 
-        if in_intersection && !exited {
-            // Vehicle is physically inside and hasn't turned yet → caution speed
+        // Inside the intersection box and not yet turned → caution speed, absolute priority.
+        if in_isect_i {
             vehicles[i].set_velocity_level(VelocityLevel::Normal);
-        } else if near_intersection && !exited {
-            let my_dist = intersection.get_distance_to_center(pos);
-            let my_id = vehicles[i].get_id();
-            let mut should_stop = false;
-            let mut has_conflicts = false;
-            let mut stop_reason_id: Option<u32> = None;
-            for j in 0..vehicles.len() {
-                if i != j {
-                    let other_pos = vehicles[j].get_position();
-                    let other_dir = vehicles[j].get_direction();
-                    let other_route = vehicles[j].get_route();
+            continue;
+        }
 
-                    if is_in_or_near_intersection(other_pos, intersection, INTERSECTION_PADDING) {
-                        // Only treat vehicles that haven't turned yet as blockers.
-                        // A vehicle with route_applied=true has already exited the conflict zone.
-                        if !vehicles[j].is_route_applied()
-                            && will_paths_conflict(dir, route, other_dir, other_route)
-                        {
-                            has_conflicts = true;
-                            let other_dist = intersection.get_distance_to_center(other_pos);
-                            let other_id = vehicles[j].get_id();
-                            // Stop if the conflicting vehicle is inside, closer to center,
-                            // or same distance with a lower ID (deterministic priority)
-                            if intersection.contains_point(other_pos)
-                                || other_dist < my_dist
-                                || (other_dist == my_dist && other_id < my_id)
-                            {
-                                should_stop = true;
-                                stop_reason_id = Some(other_id);
-                                break;
-                            }
-                        }
-                    }
-                }
+        // Approaching (or stopped outside): compute hypothetical window at Fast speed so
+        // that stopped vehicles are re-evaluated each frame and un-stop when path clears.
+        let hyp_vel   = VelocityLevel::Fast.to_pixels_per_frame();
+        let my_window = compute_time_window(pos_i, dir_i, route_i, hyp_vel, false, intersection);
+        let my_eta    = dist_to_entry_edge(pos_i, dir_i, intersection) / hyp_vel;
+        let my_id     = vehicles[i].get_id();
+
+        let mut should_stop: bool       = false;
+        let mut stop_reason_id: Option<u32> = None;
+
+        'conflict_scan: for j in 0..vehicles.len() {
+            if i == j { continue; }
+            if vehicles[j].is_route_applied() { continue; } // turned → no longer conflicts
+
+            let pos_j      = vehicles[j].get_position();
+            let dir_j      = vehicles[j].get_direction();
+            let route_j    = vehicles[j].get_route();
+            let vel_j      = vehicles[j].get_velocity();
+            let in_isect_j = intersection.contains_point(pos_j);
+
+            if !is_in_or_near_intersection(pos_j, intersection, ETA_LOOKAHEAD) { continue; }
+            if !will_paths_conflict(dir_i, route_i, dir_j, route_j) { continue; }
+
+            let j_id = vehicles[j].get_id();
+
+            // j is inside the intersection and stopped → occupies it indefinitely.
+            if in_isect_j && vel_j <= 0.0 {
+                should_stop    = true;
+                stop_reason_id = Some(j_id);
+                break 'conflict_scan;
             }
 
-            if should_stop {
-                // Only log the first frame a vehicle becomes Stopped (not every frame)
+            // Compute j’s window (use actual vel if moving, else Fast as upper bound).
+            let vel_j_w  = if vel_j > 0.0 { vel_j } else { hyp_vel };
+            let j_window = compute_time_window(pos_j, dir_j, route_j, vel_j_w, in_isect_j, intersection);
+
+            if !windows_overlap(my_window, j_window) {
+                continue; // no temporal conflict — both can proceed freely
+            }
+
+            // Windows overlap → lower eta wins; tiebreak by lower ID.
+            let j_eta = if in_isect_j {
+                -1.0_f32 // already inside = highest priority
+            } else {
+                let v = if vel_j > 0.0 { vel_j } else { hyp_vel };
+                dist_to_entry_edge(pos_j, dir_j, intersection) / v
+            };
+
+            if !(my_eta < j_eta || (my_eta == j_eta && my_id < j_id)) {
+                should_stop    = true;
+                stop_reason_id = Some(j_id);
+                break 'conflict_scan;
+            }
+        }
+
+        if should_stop {
+            let dist = dist_to_entry_edge(pos_i, dir_i, intersection);
+            if dist <= STOP_LINE_DISTANCE {
+                // At or inside the stop line — must halt here.
                 if vehicles[i].get_velocity_level() != VelocityLevel::Stopped {
                     eprintln!(
-                        "[COL P1] id={} STOPPED waiting for id={:?} pos=({:.0},{:.0}) dist={:.0}",
-                        my_id, stop_reason_id, pos.0, pos.1, my_dist
+                        "[ATW P1] id={} STOPPED at stop line (dist={:.1}) for id={:?}",
+                        my_id, dist, stop_reason_id
                     );
                 }
                 vehicles[i].set_velocity_level(VelocityLevel::Stopped);
-            } else if has_conflicts {
-                if vehicles[i].get_velocity_level() == VelocityLevel::Stopped {
-                    eprintln!("[COL P1] id={} CLEARED (conflict remains but yielded) pos=({:.0},{:.0})", my_id, pos.0, pos.1);
-                }
-                vehicles[i].set_velocity_level(VelocityLevel::Normal);
             } else {
-                if vehicles[i].get_velocity_level() == VelocityLevel::Stopped {
-                    eprintln!("[COL P1] id={} CLEARED (no conflict) pos=({:.0},{:.0})", my_id, pos.0, pos.1);
+                // Still approaching stop line — decelerate to Normal.
+                if vehicles[i].get_velocity_level() == VelocityLevel::Fast {
+                    eprintln!(
+                        "[ATW P1] id={} DECEL toward stop line (dist={:.1}) for id={:?}",
+                        my_id, dist, stop_reason_id
+                    );
                 }
                 vehicles[i].set_velocity_level(VelocityLevel::Normal);
             }
         } else {
+            if vehicles[i].get_velocity_level() == VelocityLevel::Stopped
+                || vehicles[i].get_velocity_level() == VelocityLevel::Normal
+            {
+                eprintln!("[ATW P1] id={} CLEARED pos=({:.0},{:.0})", my_id, pos_i.0, pos_i.1);
+            }
             vehicles[i].set_velocity_level(VelocityLevel::Fast);
         }
     }
@@ -146,7 +189,7 @@ pub fn check_collisions_and_apply_strategy(
                         }
                         current_close_call_pairs.insert(pair);
                     }
-                } else if distance < SAFETY_DISTANCE_NORMAL * 2.5 {
+                } else if distance < 200.0 {
                     collision_risks.push((i, j, distance, false));
                 }
             }
@@ -155,17 +198,11 @@ pub fn check_collisions_and_apply_strategy(
 
     statistics.update_close_calls(&current_close_call_pairs);
 
+    // Pass 1 (ATW) already handles all intersection priority and stopping.
+    // Pass 2 here only damps relative velocity between non-conflicting close pairs
+    // as a secondary safety net.
     for (i, j, _distance, is_conflicting) in collision_risks {
-        if is_conflicting {
-            // Pass 1 already correctly Stopped the lower-priority vehicle; never promote
-            // a Stopped back to Normal here — that would un-stop the yielding vehicle.
-            if vehicles[i].get_velocity_level() != VelocityLevel::Stopped {
-                vehicles[i].set_velocity_level(VelocityLevel::Normal);
-            }
-            if vehicles[j].get_velocity_level() != VelocityLevel::Stopped {
-                vehicles[j].set_velocity_level(VelocityLevel::Normal);
-            }
-        } else {
+        if !is_conflicting {
             let relative_velocity = vehicles[i].get_velocity() - vehicles[j].get_velocity();
             if relative_velocity > 5.0 {
                 let current_level = vehicles[i].get_velocity_level();
@@ -282,6 +319,74 @@ pub fn is_in_or_near_intersection(pos: (f32, f32), intersection: &Intersection, 
     dx < intersection.size + padding && dy < intersection.size + padding
 }
 
+// === Arrival-Time-Window helper functions ===
+
+/// Distance (px) from vehicle's position to the intersection entry edge along its direction.
+/// Returns 0.0 if already at or past the entry edge.
+fn dist_to_entry_edge(pos: (f32, f32), dir: Direction, intersection: &Intersection) -> f32 {
+    match dir {
+        Direction::North => (pos.1 - (intersection.center.1 + intersection.size)).max(0.0),
+        Direction::South => ((intersection.center.1 - intersection.size) - pos.1).max(0.0),
+        Direction::East  => ((intersection.center.0 - intersection.size) - pos.0).max(0.0),
+        Direction::West  => (pos.0 - (intersection.center.0 + intersection.size)).max(0.0),
+    }
+}
+
+/// Distance (px) from vehicle's current position to the exit edge along its direction.
+/// Used for vehicles already inside the intersection to estimate remaining crossing time.
+fn dist_to_exit_edge(pos: (f32, f32), dir: Direction, intersection: &Intersection) -> f32 {
+    match dir {
+        Direction::North => (pos.1 - (intersection.center.1 - intersection.size)).max(0.0),
+        Direction::South => ((intersection.center.1 + intersection.size) - pos.1).max(0.0),
+        Direction::East  => ((intersection.center.0 + intersection.size) - pos.0).max(0.0),
+        Direction::West  => (pos.0 - (intersection.center.0 - intersection.size)).max(0.0),
+    }
+}
+
+/// Approximate path length through the intersection for each route (pixels).
+fn crossing_distance(route: Route) -> f32 {
+    match route {
+        Route::Right    => 100.0, // short quarter-arc on outer edge
+        Route::Straight => 400.0, // full diameter
+        Route::Left     => 500.0, // wider arc across the intersection
+    }
+}
+
+/// Compute a vehicle’s time window [entry_t, exit_t] in seconds relative to now,
+/// with WINDOW_BUFFER_SECS applied to both ends.
+///
+/// * `in_intersection` – true when the vehicle is already inside the intersection box.
+/// * `vel`            – velocity in px/s.
+fn compute_time_window(
+    pos: (f32, f32),
+    dir: Direction,
+    route: Route,
+    vel: f32,
+    in_intersection: bool,
+    intersection: &Intersection,
+) -> (f32, f32) {
+    if in_intersection {
+        let remaining = dist_to_exit_edge(pos, dir, intersection);
+        let exit_t = if vel > 0.0 { remaining / vel } else { f32::MAX };
+        (-WINDOW_BUFFER_SECS, exit_t + WINDOW_BUFFER_SECS)
+    } else {
+        if vel <= 0.0 {
+            return (f32::MAX, f32::MAX); // stopped outside → no future window
+        }
+        let d_entry = dist_to_entry_edge(pos, dir, intersection);
+        let cross   = crossing_distance(route);
+        (
+            d_entry / vel - WINDOW_BUFFER_SECS,
+            (d_entry + cross) / vel + WINDOW_BUFFER_SECS,
+        )
+    }
+}
+
+/// True when two time windows [a.0, a.1] and [b.0, b.1] overlap.
+fn windows_overlap(a: (f32, f32), b: (f32, f32)) -> bool {
+    a.0 < b.1 && b.0 < a.1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,14 +432,16 @@ mod tests {
     }
 
     #[test]
-    fn single_vehicle_near_intersection_gets_normal_velocity() {
-        // y=700 → |700 - 450| = 250 < 400 (near zone) AND 250 > 200 (not inside)
+    fn single_vehicle_approaching_with_no_conflicts_gets_fast() {
+        // With ATW algorithm a single approaching vehicle (no conflicts) gets Fast,
+        // not Normal — no reason to slow down when the intersection is clear.
+        // y=700: dist_to_entry = 700-(450+200)=50px, inside ETA_LOOKAHEAD(500), no conflicts.
         let mut vehicle = Vehicle::new(0, Direction::North, Route::Straight);
         vehicle.set_position(700.0, 700.0);
         let mut vehicles = vec![vehicle];
         let mut stats = Statistics::new();
         check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
-        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Normal);
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Fast);
     }
 
     #[test]
@@ -363,19 +470,19 @@ mod tests {
     }
 
     #[test]
-    fn two_conflicting_vehicles_near_intersection_both_get_normal() {
-        // North/Straight and East/Straight have crossing paths.
-        // Both near intersection → Pass 2 detects conflict → both set to Normal.
+    fn conflicting_vehicles_atw_priority_closer_proceeds_farther_stops() {
+        // North/Straight at (700,700): dist_to_entry=50px, eta=50/160=0.3125s
+        // East/Straight  at (400,450): dist_to_entry=100px, eta=100/160=0.625s
+        // Windows overlap (both short eta, crossing=400px) → North has lower eta → North proceeds,
+        // East stops.
         let mut north = Vehicle::new(0, Direction::North, Route::Straight);
-        let mut east = Vehicle::new(1, Direction::East, Route::Straight);
-        // y=700: |700-450|=250 < 400 → near zone; |250| > 200 → not in intersection
+        let mut east  = Vehicle::new(1, Direction::East,  Route::Straight);
         north.set_position(700.0, 700.0);
-        // x=400: |400-700|=300 < 400 → near zone; |300| > 200 → not in intersection
         east.set_position(400.0, 450.0);
         let mut vehicles = vec![north, east];
         let mut stats = Statistics::new();
         check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
-        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Normal, "North vehicle should be Normal due to conflict");
-        assert_eq!(vehicles[1].get_velocity_level(), VelocityLevel::Normal, "East vehicle should be Normal due to conflict");
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Fast,    "North (closer) should proceed at Fast");
+        assert_eq!(vehicles[1].get_velocity_level(), VelocityLevel::Stopped, "East (farther) should stop and yield");
     }
 }
