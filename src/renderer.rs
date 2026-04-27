@@ -525,7 +525,7 @@ impl Renderer {
 
     /// Debug overlay: draws the vehicle's axis-aligned hitbox (30×15), the safety-distance
     /// circle matching the current velocity level, and the vehicle ID as a number overlay.
-    /// Safety radii match collision.rs constants: Fast=120, Normal=80, Slow/Stopped=50.
+    /// Safety radii match collision.rs constants: Fast=120, Normal=80, Stopped=50.
     pub fn draw_vehicle_debug(&mut self, vehicle: &Vehicle) -> Result<(), Box<dyn std::error::Error>> {
         use crate::vehicle::VelocityLevel;
         let pos = vehicle.get_position();
@@ -543,13 +543,11 @@ impl Renderer {
         let radius = match vehicle.get_velocity_level() {
             VelocityLevel::Fast    => 120i32,
             VelocityLevel::Normal  => 80i32,
-            VelocityLevel::Slow    => 50i32,
             VelocityLevel::Stopped => 50i32,
         };
         let circle_color = match vehicle.get_velocity_level() {
             VelocityLevel::Fast    => Color::RGB(0, 200, 0),   // green
             VelocityLevel::Normal  => Color::RGB(200, 200, 0), // yellow
-            VelocityLevel::Slow    => Color::RGB(255, 100, 0), // orange-red
             VelocityLevel::Stopped => Color::RGB(255, 0, 0),   // red
         };
         self.draw_circle(cx, cy, radius, circle_color)?;
@@ -559,7 +557,6 @@ impl Renderer {
         let label = match vehicle.get_velocity_level() {
             VelocityLevel::Fast    => "F",
             VelocityLevel::Normal  => "N",
-            VelocityLevel::Slow    => "S",
             VelocityLevel::Stopped => "X",
         };
         // Draw tiny 3×5 pixel letter by sampling a hard-coded bitmap

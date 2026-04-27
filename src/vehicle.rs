@@ -12,7 +12,6 @@ pub enum Route {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VelocityLevel {
     Stopped,   // 0 pixels/frame - waiting for intersection to clear
-    Slow,      // 40 pixels/frame - used for congestion/safety
     Normal,    // 100 pixels/frame - standard operating speed
     Fast,      // 160 pixels/frame - free flow speed
 }
@@ -21,7 +20,6 @@ impl VelocityLevel {
     pub fn to_pixels_per_frame(&self) -> f32 {
         match self {
             VelocityLevel::Stopped => 0.0,
-            VelocityLevel::Slow => 40.0,
             VelocityLevel::Normal => 100.0,
             VelocityLevel::Fast => 160.0,
         }
@@ -30,7 +28,6 @@ impl VelocityLevel {
     pub fn description(&self) -> &'static str {
         match self {
             VelocityLevel::Stopped => "Stopped (0 px/f)",
-            VelocityLevel::Slow => "Slow (40 px/f)",
             VelocityLevel::Normal => "Normal (100 px/f)",
             VelocityLevel::Fast => "Fast (160 px/f)",
         }
@@ -308,25 +305,12 @@ impl Vehicle {
             self.set_velocity_level(VelocityLevel::Stopped);
             return;
         }
-
-        let slow_speed = VelocityLevel::Slow.to_pixels_per_frame();
-        let normal_speed = VelocityLevel::Normal.to_pixels_per_frame();
-        let fast_speed = VelocityLevel::Fast.to_pixels_per_frame();
-
-        let clamped_vel = vel.min(200.0);
-
-        let level = if (clamped_vel - slow_speed).abs() < (clamped_vel - normal_speed).abs() {
-            if (clamped_vel - slow_speed).abs() < (clamped_vel - fast_speed).abs() {
-                VelocityLevel::Slow
-            } else {
-                VelocityLevel::Fast
-            }
-        } else if (clamped_vel - normal_speed).abs() < (clamped_vel - fast_speed).abs() {
+        // Midpoint between Normal (100) and Fast (160) is 130
+        let level = if vel.min(200.0) < 130.0 {
             VelocityLevel::Normal
         } else {
             VelocityLevel::Fast
         };
-
         self.set_velocity_level(level);
     }
 
@@ -540,7 +524,6 @@ impl Vehicle {
             velocity_pixels_per_frame: self.velocity,
             average_velocity_level: match self.velocity_level {
                 VelocityLevel::Stopped => "Stopped (0 px/f)",
-                VelocityLevel::Slow => "Slow (40 px/f)",
                 VelocityLevel::Normal => "Normal (100 px/f)",
                 VelocityLevel::Fast => "Fast (160 px/f)",
             },

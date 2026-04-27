@@ -3,9 +3,9 @@ use crate::intersection::{Intersection, Direction};
 use crate::statistics::Statistics;
 use std::collections::HashSet;
 
-const SAFETY_DISTANCE_FAST: f32 = 120.0;
-const SAFETY_DISTANCE_NORMAL: f32 = 80.0;
-const SAFETY_DISTANCE_SLOW: f32 = 50.0; // must exceed vehicle body length (~30px)
+const SAFETY_DISTANCE_FAST: f32 = 120.0;  // beyond this → Fast
+const SAFETY_DISTANCE_NORMAL: f32 = 80.0;  // within this → Normal; below STOP_DISTANCE → Stopped
+const SAFETY_DISTANCE_STOP: f32 = 50.0;   // must exceed vehicle body length (~30px)
 // Near zone = intersection boundary + this padding.  Keep small so vehicles only
 // enter the wait zone when genuinely close to the intersection.
 const INTERSECTION_PADDING: f32 = 50.0;
@@ -22,9 +22,9 @@ pub fn check_collisions_and_apply_strategy(
     let prev_levels: Vec<VelocityLevel> = vehicles.iter().map(|v| v.get_velocity_level()).collect();
 
     // Pass 1: set baseline velocity by intersection zone.
-    // - In intersection: Slow
-    // - Near intersection with a conflicting vehicle ALREADY IN the intersection: stop (velocity 0)
-    // - Near intersection with conflict but no vehicle inside: Slow
+    // - In intersection: Normal (caution speed)
+    // - Near intersection with a conflicting vehicle ALREADY IN the intersection: Stopped
+    // - Near intersection with conflict but no vehicle inside: Normal
     // - Near intersection, no conflict: Normal
     // - Far from intersection: Fast
     for i in 0..vehicles.len() {
@@ -37,8 +37,8 @@ pub fn check_collisions_and_apply_strategy(
         let near_intersection = is_in_or_near_intersection(pos, intersection, INTERSECTION_PADDING);
 
         if in_intersection && !exited {
-            // Vehicle is physically inside and hasn't turned yet → slow down
-            vehicles[i].set_velocity_level(VelocityLevel::Slow);
+            // Vehicle is physically inside and hasn't turned yet → caution speed
+            vehicles[i].set_velocity_level(VelocityLevel::Normal);
         } else if near_intersection && !exited {
             let my_dist = intersection.get_distance_to_center(pos);
             let my_id = vehicles[i].get_id();
@@ -88,7 +88,7 @@ pub fn check_collisions_and_apply_strategy(
                 if vehicles[i].get_velocity_level() == VelocityLevel::Stopped {
                     eprintln!("[COL P1] id={} CLEARED (conflict remains but yielded) pos=({:.0},{:.0})", my_id, pos.0, pos.1);
                 }
-                vehicles[i].set_velocity_level(VelocityLevel::Slow);
+                vehicles[i].set_velocity_level(VelocityLevel::Normal);
             } else {
                 if vehicles[i].get_velocity_level() == VelocityLevel::Stopped {
                     eprintln!("[COL P1] id={} CLEARED (no conflict) pos=({:.0},{:.0})", my_id, pos.0, pos.1);
@@ -100,7 +100,7 @@ pub fn check_collisions_and_apply_strategy(
         }
     }
 
-    // Pass 2: reduce velocity for at-risk pairs — Slow both vehicles if paths conflict;
+    // Pass 2: reduce velocity for at-risk pairs — set Normal for conflicting vehicles;
     //         damp relative velocity for non-conflicting pairs that are close together.
     let mut collision_risks = Vec::new();
     // Track currently-active close-call pairs so we count once per encounter, not once per frame.
@@ -158,12 +158,12 @@ pub fn check_collisions_and_apply_strategy(
     for (i, j, _distance, is_conflicting) in collision_risks {
         if is_conflicting {
             // Pass 1 already correctly Stopped the lower-priority vehicle; never promote
-            // a Stopped back to Slow here — that would un-stop the yielding vehicle.
+            // a Stopped back to Normal here — that would un-stop the yielding vehicle.
             if vehicles[i].get_velocity_level() != VelocityLevel::Stopped {
-                vehicles[i].set_velocity_level(VelocityLevel::Slow);
+                vehicles[i].set_velocity_level(VelocityLevel::Normal);
             }
             if vehicles[j].get_velocity_level() != VelocityLevel::Stopped {
-                vehicles[j].set_velocity_level(VelocityLevel::Slow);
+                vehicles[j].set_velocity_level(VelocityLevel::Normal);
             }
         } else {
             let relative_velocity = vehicles[i].get_velocity() - vehicles[j].get_velocity();
@@ -171,18 +171,16 @@ pub fn check_collisions_and_apply_strategy(
                 let current_level = vehicles[i].get_velocity_level();
                 let new_level = match current_level {
                     VelocityLevel::Stopped => VelocityLevel::Stopped,
-                    VelocityLevel::Fast => VelocityLevel::Normal,
-                    VelocityLevel::Normal => VelocityLevel::Slow,
-                    VelocityLevel::Slow => VelocityLevel::Slow,
+                    VelocityLevel::Fast    => VelocityLevel::Normal,
+                    VelocityLevel::Normal  => VelocityLevel::Normal,
                 };
                 vehicles[i].set_velocity_level(new_level);
             } else if relative_velocity < -5.0 {
                 let current_level = vehicles[j].get_velocity_level();
                 let new_level = match current_level {
                     VelocityLevel::Stopped => VelocityLevel::Stopped,
-                    VelocityLevel::Fast => VelocityLevel::Normal,
-                    VelocityLevel::Normal => VelocityLevel::Slow,
-                    VelocityLevel::Slow => VelocityLevel::Slow,
+                    VelocityLevel::Fast    => VelocityLevel::Normal,
+                    VelocityLevel::Normal  => VelocityLevel::Normal,
                 };
                 vehicles[j].set_velocity_level(new_level);
             }
@@ -224,10 +222,8 @@ pub fn check_collisions_and_apply_strategy(
                     // the threshold applies: we only step DOWN when distance drops 5px
                     // below the bucket edge, and only step UP when it rises 5px above.
                     let cur = prev_levels[i];
-                    let new_level = if distance < SAFETY_DISTANCE_SLOW {
+                    let new_level = if distance < SAFETY_DISTANCE_STOP {
                         VelocityLevel::Stopped
-                    } else if distance < SAFETY_DISTANCE_NORMAL - if cur == VelocityLevel::Normal { 5.0 } else { 0.0 } {
-                        VelocityLevel::Slow
                     } else if distance < SAFETY_DISTANCE_FAST - if cur == VelocityLevel::Fast { 5.0 } else { 0.0 } {
                         VelocityLevel::Normal
                     } else {
@@ -320,14 +316,14 @@ mod tests {
     }
 
     #[test]
-    fn vehicle_in_intersection_gets_slow_velocity() {
+    fn vehicle_in_intersection_gets_normal_velocity() {
         // (700, 450) is the center — inside on both axes (|0| < 200)
         let mut vehicle = Vehicle::new(0, Direction::North, Route::Straight);
         vehicle.set_position(700.0, 450.0);
         let mut vehicles = vec![vehicle];
         let mut stats = Statistics::new();
         check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
-        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Slow);
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Normal);
     }
 
     #[test]
@@ -362,14 +358,14 @@ mod tests {
         assert_eq!(
             vehicles[1].get_velocity_level(),
             VelocityLevel::Normal,
-            "follower within safety distance of leader must be reduced from Fast to Normal"
+            "follower within safety distance of leader must be reduced from Fast to Normal (no Slow level exists)"
         );
     }
 
     #[test]
-    fn two_conflicting_vehicles_near_intersection_both_get_slow() {
-        // North/Straight and East/Straight have crossing paths (are_paths_intersecting_at_center).
-        // Both near intersection → Pass 2 detects conflict → both set to Slow.
+    fn two_conflicting_vehicles_near_intersection_both_get_normal() {
+        // North/Straight and East/Straight have crossing paths.
+        // Both near intersection → Pass 2 detects conflict → both set to Normal.
         let mut north = Vehicle::new(0, Direction::North, Route::Straight);
         let mut east = Vehicle::new(1, Direction::East, Route::Straight);
         // y=700: |700-450|=250 < 400 → near zone; |250| > 200 → not in intersection
@@ -379,7 +375,7 @@ mod tests {
         let mut vehicles = vec![north, east];
         let mut stats = Statistics::new();
         check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
-        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Slow, "North vehicle should be Slow due to conflict");
-        assert_eq!(vehicles[1].get_velocity_level(), VelocityLevel::Slow, "East vehicle should be Slow due to conflict");
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Normal, "North vehicle should be Normal due to conflict");
+        assert_eq!(vehicles[1].get_velocity_level(), VelocityLevel::Normal, "East vehicle should be Normal due to conflict");
     }
 }
