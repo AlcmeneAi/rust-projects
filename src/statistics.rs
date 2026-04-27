@@ -1,4 +1,5 @@
 use crate::vehicle::Vehicle;
+use std::collections::HashSet;
 
 pub struct Statistics {
     vehicle_count: u32,
@@ -7,6 +8,7 @@ pub struct Statistics {
     max_time: f32,
     min_time: f32,
     close_calls: u32,
+    active_close_call_pairs: HashSet<(u32, u32)>,
     first_vehicle: bool,
 }
 
@@ -19,6 +21,7 @@ impl Statistics {
             max_time: 0.0,
             min_time: f32::MAX,
             close_calls: 0,
+            active_close_call_pairs: HashSet::new(),
             first_vehicle: true,
         }
     }
@@ -42,8 +45,20 @@ impl Statistics {
         self.first_vehicle = false;
     }
 
-    pub fn record_close_call(&mut self) {
-        self.close_calls += 1;
+    /// Called each frame with the set of vehicle-ID pairs currently in a close-call.
+    /// Increments the counter only for pairs that weren't already active last frame,
+    /// so each physical encounter is counted exactly once regardless of its duration.
+    pub fn is_active_close_call(&self, pair: &(u32, u32)) -> bool {
+        self.active_close_call_pairs.contains(pair)
+    }
+
+    pub fn update_close_calls(&mut self, current: &HashSet<(u32, u32)>) {
+        for &pair in current {
+            if !self.active_close_call_pairs.contains(&pair) {
+                self.close_calls += 1;
+            }
+        }
+        self.active_close_call_pairs = current.clone();
     }
 
     pub fn get_vehicle_count(&self) -> u32 {

@@ -11,6 +11,7 @@ pub enum Route {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VelocityLevel {
+    Stopped,   // 0 pixels/frame - waiting for intersection to clear
     Slow,      // 40 pixels/frame - used for congestion/safety
     Normal,    // 100 pixels/frame - standard operating speed
     Fast,      // 160 pixels/frame - free flow speed
@@ -19,6 +20,7 @@ pub enum VelocityLevel {
 impl VelocityLevel {
     pub fn to_pixels_per_frame(&self) -> f32 {
         match self {
+            VelocityLevel::Stopped => 0.0,
             VelocityLevel::Slow => 40.0,
             VelocityLevel::Normal => 100.0,
             VelocityLevel::Fast => 160.0,
@@ -27,6 +29,7 @@ impl VelocityLevel {
 
     pub fn description(&self) -> &'static str {
         match self {
+            VelocityLevel::Stopped => "Stopped (0 px/f)",
             VelocityLevel::Slow => "Slow (40 px/f)",
             VelocityLevel::Normal => "Normal (100 px/f)",
             VelocityLevel::Fast => "Fast (160 px/f)",
@@ -139,30 +142,51 @@ impl Vehicle {
     }
 
     pub fn update(&mut self, dt: f32) {
+        let pos_before = self.position;
         let distance_this_frame = self.velocity * dt;
         self.distance_traveled += distance_this_frame;
 
         match self.direction {
             Direction::North => {
                 self.position.1 -= self.velocity * dt;
-                // Constrain to assigned lane (horizontal lanes)
-                self.enforce_lane_constraint_north();
+                // Only enforce lane constraints before the route turn — after turning,
+                // the vehicle is on a different road and assigned_lane no longer applies.
+                if !self.route_applied {
+                    self.enforce_lane_constraint_north();
+                }
             }
             Direction::South => {
                 self.position.1 += self.velocity * dt;
-                // Constrain to assigned lane (horizontal lanes)
-                self.enforce_lane_constraint_south();
+                if !self.route_applied {
+                    self.enforce_lane_constraint_south();
+                }
             }
             Direction::East => {
                 self.position.0 += self.velocity * dt;
-                // Constrain to assigned lane (vertical lanes)
-                self.enforce_lane_constraint_east();
+                if !self.route_applied {
+                    self.enforce_lane_constraint_east();
+                }
             }
             Direction::West => {
                 self.position.0 -= self.velocity * dt;
-                // Constrain to assigned lane (vertical lanes)
-                self.enforce_lane_constraint_west();
+                if !self.route_applied {
+                    self.enforce_lane_constraint_west();
+                }
             }
+        }
+
+        // Detect unexpected large jumps (teleports)
+        let dx = (self.position.0 - pos_before.0).abs();
+        let dy = (self.position.1 - pos_before.1).abs();
+        let max_expected = self.velocity * dt + 1.0; // +1 for fp rounding
+        if dx > max_expected || dy > max_expected {
+            eprintln!(
+                "[JUMP] id={} dir={:?} route_applied={} ({:.1},{:.1})->({:.1},{:.1}) delta=({:.1},{:.1}) max={:.1}",
+                self.id, self.direction, self.route_applied,
+                pos_before.0, pos_before.1,
+                self.position.0, self.position.1,
+                dx, dy, max_expected
+            );
         }
 
         // Update animation if direction changed
@@ -184,6 +208,11 @@ impl Vehicle {
         let target_x = 725.0 + (self.assigned_lane as f32 * 50.0);
         let tolerance = 20.0;
         if (self.position.0 - target_x).abs() > tolerance {
+            eprintln!(
+                "[LANE-SNAP N] id={} lane={} x: {:.1} -> {:.1} (off {:.1})",
+                self.id, self.assigned_lane, self.position.0, target_x,
+                self.position.0 - target_x
+            );
             self.position.0 = target_x;
         }
     }
@@ -193,6 +222,11 @@ impl Vehicle {
         let target_x = 675.0 - (self.assigned_lane as f32 * 50.0);
         let tolerance = 20.0;
         if (self.position.0 - target_x).abs() > tolerance {
+            eprintln!(
+                "[LANE-SNAP S] id={} lane={} x: {:.1} -> {:.1} (off {:.1})",
+                self.id, self.assigned_lane, self.position.0, target_x,
+                self.position.0 - target_x
+            );
             self.position.0 = target_x;
         }
     }
@@ -202,6 +236,11 @@ impl Vehicle {
         let target_y = 475.0 + (self.assigned_lane as f32 * 50.0);
         let tolerance = 20.0;
         if (self.position.1 - target_y).abs() > tolerance {
+            eprintln!(
+                "[LANE-SNAP E] id={} lane={} y: {:.1} -> {:.1} (off {:.1})",
+                self.id, self.assigned_lane, self.position.1, target_y,
+                self.position.1 - target_y
+            );
             self.position.1 = target_y;
         }
     }
@@ -211,6 +250,11 @@ impl Vehicle {
         let target_y = 425.0 - (self.assigned_lane as f32 * 50.0);
         let tolerance = 20.0;
         if (self.position.1 - target_y).abs() > tolerance {
+            eprintln!(
+                "[LANE-SNAP W] id={} lane={} y: {:.1} -> {:.1} (off {:.1})",
+                self.id, self.assigned_lane, self.position.1, target_y,
+                self.position.1 - target_y
+            );
             self.position.1 = target_y;
         }
     }
@@ -239,6 +283,10 @@ impl Vehicle {
         self.route
     }
 
+    pub fn is_route_applied(&self) -> bool {
+        self.route_applied
+    }
+
     pub fn get_velocity(&self) -> f32 {
         self.velocity
     }
@@ -256,28 +304,29 @@ impl Vehicle {
 
     /// Legacy method: Set velocity directly (will be converted to nearest velocity level)
     pub fn set_velocity(&mut self, vel: f32) {
-        // Convert absolute velocity to nearest velocity level
+        if vel <= 0.0 {
+            self.set_velocity_level(VelocityLevel::Stopped);
+            return;
+        }
+
         let slow_speed = VelocityLevel::Slow.to_pixels_per_frame();
         let normal_speed = VelocityLevel::Normal.to_pixels_per_frame();
         let fast_speed = VelocityLevel::Fast.to_pixels_per_frame();
 
-        let clamped_vel = vel.max(10.0).min(200.0);
-        
-        // Determine closest velocity level
+        let clamped_vel = vel.min(200.0);
+
         let level = if (clamped_vel - slow_speed).abs() < (clamped_vel - normal_speed).abs() {
             if (clamped_vel - slow_speed).abs() < (clamped_vel - fast_speed).abs() {
                 VelocityLevel::Slow
             } else {
                 VelocityLevel::Fast
             }
+        } else if (clamped_vel - normal_speed).abs() < (clamped_vel - fast_speed).abs() {
+            VelocityLevel::Normal
         } else {
-            if (clamped_vel - normal_speed).abs() < (clamped_vel - fast_speed).abs() {
-                VelocityLevel::Normal
-            } else {
-                VelocityLevel::Fast
-            }
+            VelocityLevel::Fast
         };
-        
+
         self.set_velocity_level(level);
     }
 
@@ -317,16 +366,38 @@ impl Vehicle {
         false
     }
 
-    pub fn should_apply_route_turn(&self, intersection_center: (f32, f32), threshold: f32) -> bool {
+    pub fn should_apply_route_turn(&self, intersection_center: (f32, f32), _threshold: f32) -> bool {
         if self.route_applied {
             return false;
         }
-
-        let dx = self.position.0 - intersection_center.0;
-        let dy = self.position.1 - intersection_center.1;
-        let distance = (dx * dx + dy * dy).sqrt();
-
-        distance < threshold
+        // Fire when the vehicle has physically arrived at the snap-target position
+        // on the perpendicular axis, so the subsequent snap is a micro-correction (<5px).
+        // For Straight routes there is no snap, so we use the intersection centre line.
+        //
+        // Snap targets (matches apply_route_turn):
+        //   North+Right→East  snap y=575   North+Left→West  snap y=425
+        //   South+Left→East   snap y=475   South+Right→West snap y=325
+        //   East+Right→South  snap x=575   East+Left→North  snap x=725
+        //   West+Left→South   snap x=675   West+Right→North snap x=825
+        const M: f32 = 5.0; // tiny margin for one-frame overshoot
+        match (self.direction, self.route) {
+            // Northbound: y decreasing from ~900 towards 0
+            (Direction::North, Route::Right)    => self.position.1 <= 575.0 + M,
+            (Direction::North, Route::Left)     => self.position.1 <= 425.0 + M,
+            (Direction::North, Route::Straight) => self.position.1 <= intersection_center.1 + M,
+            // Southbound: y increasing from ~0 towards 900
+            (Direction::South, Route::Left)     => self.position.1 >= 475.0 - M,
+            (Direction::South, Route::Right)    => self.position.1 >= 325.0 - M,
+            (Direction::South, Route::Straight) => self.position.1 >= intersection_center.1 - M,
+            // Eastbound: x increasing from ~0 towards 1400
+            (Direction::East, Route::Left)      => self.position.0 >= 725.0 - M,
+            (Direction::East, Route::Right)     => self.position.0 >= 575.0 - M,
+            (Direction::East, Route::Straight)  => self.position.0 >= intersection_center.0 - M,
+            // Westbound: x decreasing from ~1400 towards 0
+            (Direction::West, Route::Left)      => self.position.0 <= 675.0 + M,
+            (Direction::West, Route::Right)     => self.position.0 <= 825.0 + M,
+            (Direction::West, Route::Straight)  => self.position.0 <= intersection_center.0 + M,
+        }
     }
 
     pub fn apply_route_turn(&mut self) {
@@ -335,6 +406,11 @@ impl Vehicle {
         }
 
         self.route_applied = true;
+
+        eprintln!(
+            "[TURN] id={} dir={:?} route={:?} pos=({:.1},{:.1}) BEFORE TURN",
+            self.id, self.direction, self.route, self.position.0, self.position.1
+        );
 
         self.direction = match (self.direction, self.route) {
             // From North
@@ -357,6 +433,32 @@ impl Vehicle {
             (Direction::West, Route::Straight) => Direction::West,
             (Direction::West, Route::Right) => Direction::North,
         };
+
+        // Snap the perpendicular coordinate to the correct exit lane.
+        // Lane positions (using intersection center 700,450, lane width 50):
+        //   Northbound: x = 725 + lane*50  (lane 0=Left,1=Straight,2=Right)
+        //   Southbound: x = 675 - lane*50
+        //   Eastbound:  y = 475 + lane*50
+        //   Westbound:  y = 425 - lane*50
+        // Right turns enter lane 2 (outer), Left turns enter lane 0 (inner).
+        let pos_before_snap = self.position;
+        match (self.route, self.direction) {
+            (Route::Right, Direction::East)  => self.position.1 = 575.0, // ex-North, eastbound outer
+            (Route::Right, Direction::West)  => self.position.1 = 325.0, // ex-South, westbound outer
+            (Route::Right, Direction::South) => self.position.0 = 575.0, // ex-East,  southbound outer
+            (Route::Right, Direction::North) => self.position.0 = 825.0, // ex-West,  northbound outer
+            (Route::Left,  Direction::West)  => self.position.1 = 425.0, // ex-North, westbound inner
+            (Route::Left,  Direction::East)  => self.position.1 = 475.0, // ex-South, eastbound inner
+            (Route::Left,  Direction::North) => self.position.0 = 725.0, // ex-East,  northbound inner
+            (Route::Left,  Direction::South) => self.position.0 = 675.0, // ex-West,  southbound inner
+            _ => {}
+        }
+        eprintln!(
+            "[TURN] id={} new_dir={:?} snap ({:.1},{:.1})->({:.1},{:.1})",
+            self.id, self.direction,
+            pos_before_snap.0, pos_before_snap.1,
+            self.position.0, self.position.1
+        );
     }
 
     // ==================== Physics Tracking Methods ====================
@@ -437,6 +539,7 @@ impl Vehicle {
             velocity_pixels_per_second: self.intersection_physics_velocity,
             velocity_pixels_per_frame: self.velocity,
             average_velocity_level: match self.velocity_level {
+                VelocityLevel::Stopped => "Stopped (0 px/f)",
                 VelocityLevel::Slow => "Slow (40 px/f)",
                 VelocityLevel::Normal => "Normal (100 px/f)",
                 VelocityLevel::Fast => "Fast (160 px/f)",

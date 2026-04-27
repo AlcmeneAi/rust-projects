@@ -47,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame_count = 0;
     let mut vehicle_counter = 0u32;
     let mut total_time = 0.0f32;  // Total elapsed time in seconds
+    let mut debug_mode = false;   // D key toggles hitbox/safety-radius overlay
 
     let frame_time = Duration::from_millis(1000 / FPS as u64);
     let dt = 1.0 / FPS as f32;  // Delta time per frame
@@ -81,6 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Keycode::R => {
                             input_handler.toggle_random_generation();
+                        }
+                        Keycode::D => {
+                            debug_mode = !debug_mode;
+                            eprintln!("[DEBUG] hitbox overlay = {}", debug_mode);
                         }
                         _ => {}
                     }
@@ -146,6 +151,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for vehicle in &vehicles {
             renderer.draw_vehicle(vehicle)?;
+            if debug_mode {
+                renderer.draw_vehicle_debug(vehicle)?;
+            }
         }
 
         renderer.present();

@@ -522,5 +522,113 @@ impl Renderer {
 
         Ok(())
     }
+
+    /// Debug overlay: draws the vehicle's axis-aligned hitbox (30×15), the safety-distance
+    /// circle matching the current velocity level, and the vehicle ID as a number overlay.
+    /// Safety radii match collision.rs constants: Fast=120, Normal=80, Slow/Stopped=50.
+    pub fn draw_vehicle_debug(&mut self, vehicle: &Vehicle) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::vehicle::VelocityLevel;
+        let pos = vehicle.get_position();
+        let cx = pos.0 as i32;
+        let cy = pos.1 as i32;
+
+        // --- Hitbox (axis-aligned bounding box, 30×15) ---
+        let hw = 15i32; // half-width
+        let hh = 8i32;  // half-height
+        let hitbox = sdl2::rect::Rect::new(cx - hw, cy - hh, (hw * 2) as u32, (hh * 2) as u32);
+        self.canvas.set_draw_color(Color::RGBA(255, 165, 0, 255)); // orange
+        self.canvas.draw_rect(hitbox).ok();
+
+        // --- Safety-distance circle ---
+        let radius = match vehicle.get_velocity_level() {
+            VelocityLevel::Fast    => 120i32,
+            VelocityLevel::Normal  => 80i32,
+            VelocityLevel::Slow    => 50i32,
+            VelocityLevel::Stopped => 50i32,
+        };
+        let circle_color = match vehicle.get_velocity_level() {
+            VelocityLevel::Fast    => Color::RGB(0, 200, 0),   // green
+            VelocityLevel::Normal  => Color::RGB(200, 200, 0), // yellow
+            VelocityLevel::Slow    => Color::RGB(255, 100, 0), // orange-red
+            VelocityLevel::Stopped => Color::RGB(255, 0, 0),   // red
+        };
+        self.draw_circle(cx, cy, radius, circle_color)?;
+
+        // --- Velocity label (single character for readability) ---
+        let label_color = Color::RGB(255, 255, 255);
+        let label = match vehicle.get_velocity_level() {
+            VelocityLevel::Fast    => "F",
+            VelocityLevel::Normal  => "N",
+            VelocityLevel::Slow    => "S",
+            VelocityLevel::Stopped => "X",
+        };
+        // Draw tiny 3×5 pixel letter by sampling a hard-coded bitmap
+        self.draw_debug_label(cx, cy - hh - 10, vehicle.get_id(), label, label_color)?;
+
+        Ok(())
+    }
+
+    /// Draw a circle outline using the midpoint circle algorithm.
+    fn draw_circle(&mut self, cx: i32, cy: i32, r: i32, color: Color) -> Result<(), Box<dyn std::error::Error>> {
+        self.canvas.set_draw_color(color);
+        let mut x = r;
+        let mut y = 0i32;
+        let mut err = 0i32;
+        while x >= y {
+            let points = [
+                (cx + x, cy + y), (cx - x, cy + y),
+                (cx + x, cy - y), (cx - x, cy - y),
+                (cx + y, cy + x), (cx - y, cy + x),
+                (cx + y, cy - x), (cx - y, cy - x),
+            ];
+            for (px, py) in points {
+                self.canvas.draw_point(sdl2::rect::Point::new(px, py)).ok();
+            }
+            y += 1;
+            err += 2 * y - 1;
+            if err > x {
+                x -= 1;
+                err -= 2 * x + 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Draw a tiny "id=N vel=L" label above the vehicle using small dots.
+    fn draw_debug_label(&mut self, cx: i32, cy: i32, id: u32, vel: &str, color: Color) -> Result<(), Box<dyn std::error::Error>> {
+        self.canvas.set_draw_color(color);
+        // Just draw a small 4×4 pixel dot so it's visible without a font
+        let text = format!("{}{}", id, vel);
+        let mut ox = cx - (text.len() as i32 * 4) / 2;
+        for ch in text.chars() {
+            // Draw a simple 3×5 pixel digit/letter using a minimal bitmap
+            let bitmap: &[u8] = match ch {
+                '0' => &[0b111,0b101,0b101,0b101,0b111],
+                '1' => &[0b010,0b110,0b010,0b010,0b111],
+                '2' => &[0b111,0b001,0b111,0b100,0b111],
+                '3' => &[0b111,0b001,0b011,0b001,0b111],
+                '4' => &[0b101,0b101,0b111,0b001,0b001],
+                '5' => &[0b111,0b100,0b111,0b001,0b111],
+                '6' => &[0b111,0b100,0b111,0b101,0b111],
+                '7' => &[0b111,0b001,0b001,0b001,0b001],
+                '8' => &[0b111,0b101,0b111,0b101,0b111],
+                '9' => &[0b111,0b101,0b111,0b001,0b111],
+                'F' => &[0b111,0b100,0b111,0b100,0b100],
+                'N' => &[0b101,0b111,0b111,0b101,0b101],
+                'S' => &[0b111,0b100,0b111,0b001,0b111],
+                'X' => &[0b101,0b101,0b010,0b101,0b101],
+                _   => &[0b000,0b000,0b010,0b000,0b000],
+            };
+            for (row, &bits) in bitmap.iter().enumerate() {
+                for col in 0..3i32 {
+                    if bits & (1 << (2 - col)) != 0 {
+                        self.canvas.draw_point(sdl2::rect::Point::new(ox + col, cy + row as i32)).ok();
+                    }
+                }
+            }
+            ox += 4;
+        }
+        Ok(())
+    }
 }
 
