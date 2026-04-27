@@ -109,30 +109,30 @@ impl Vehicle {
     }
 
     fn calculate_initial_position(direction: Direction, lane: u32) -> (f32, f32) {
-        // Lane width is 50 pixels, and center of each lane starts at 25 pixels from edge
-        let lane_offset = 25.0 + (lane as f32 * 50.0);
-        
+        // Intersection center: (700, 450). Road half-width = 150.
+        // N/S road: x 550-850. Northbound (right half): center + 25 + lane*50.
+        //                        Southbound (left half):  center - 25 - lane*50.
+        // E/W road: y 300-600. Eastbound (bottom half):  center + 25 + lane*50.
+        //                       Westbound (top half):     center - 25 - lane*50.
         match direction {
             Direction::North => {
-                // Coming from North, lanes are horizontal
-                // Left lane: x = 650, Middle: 700, Right: 750
-                let x = 650.0 + (lane as f32 * 50.0);
+                // Northbound: right (east) half of N/S road
+                let x = 725.0 + (lane as f32 * 50.0);
                 (x, 1200.0)
             }
             Direction::South => {
-                // Coming from South, lanes are horizontal
-                let x = 650.0 + (lane as f32 * 50.0);
+                // Southbound: left (west) half of N/S road
+                let x = 675.0 - (lane as f32 * 50.0);
                 (x, -200.0)
             }
             Direction::East => {
-                // Coming from East, lanes are vertical
-                // Left lane: y = 400, Middle: 450, Right: 500
-                let y = 400.0 + (lane as f32 * 50.0);
+                // Eastbound: bottom half of E/W road
+                let y = 475.0 + (lane as f32 * 50.0);
                 (-200.0, y)
             }
             Direction::West => {
-                // Coming from West, lanes are vertical
-                let y = 400.0 + (lane as f32 * 50.0);
+                // Westbound: top half of E/W road
+                let y = 425.0 - (lane as f32 * 50.0);
                 (1600.0, y)
             }
         }
@@ -180,44 +180,36 @@ impl Vehicle {
     }
 
     fn enforce_lane_constraint_north(&mut self) {
-        // North bound: lanes are at x = 650, 700, 750 (centered)
-        let target_x = 650.0 + (self.assigned_lane as f32 * 50.0);
-        let lane_width = 50.0;
-        let tolerance = lane_width / 2.0 - 5.0;
-        
+        // Northbound: right (east) half of N/S road — x = 725, 775, 825
+        let target_x = 725.0 + (self.assigned_lane as f32 * 50.0);
+        let tolerance = 20.0;
         if (self.position.0 - target_x).abs() > tolerance {
             self.position.0 = target_x;
         }
     }
 
     fn enforce_lane_constraint_south(&mut self) {
-        // South bound: lanes are at x = 650, 700, 750 (centered)
-        let target_x = 650.0 + (self.assigned_lane as f32 * 50.0);
-        let lane_width = 50.0;
-        let tolerance = lane_width / 2.0 - 5.0;
-        
+        // Southbound: left (west) half of N/S road — x = 675, 625, 575
+        let target_x = 675.0 - (self.assigned_lane as f32 * 50.0);
+        let tolerance = 20.0;
         if (self.position.0 - target_x).abs() > tolerance {
             self.position.0 = target_x;
         }
     }
 
     fn enforce_lane_constraint_east(&mut self) {
-        // East bound: lanes are at y = 400, 450, 500 (centered)
-        let target_y = 400.0 + (self.assigned_lane as f32 * 50.0);
-        let lane_width = 50.0;
-        let tolerance = lane_width / 2.0 - 5.0;
-        
+        // Eastbound: bottom half of E/W road — y = 475, 525, 575
+        let target_y = 475.0 + (self.assigned_lane as f32 * 50.0);
+        let tolerance = 20.0;
         if (self.position.1 - target_y).abs() > tolerance {
             self.position.1 = target_y;
         }
     }
 
     fn enforce_lane_constraint_west(&mut self) {
-        // West bound: lanes are at y = 400, 450, 500 (centered)
-        let target_y = 400.0 + (self.assigned_lane as f32 * 50.0);
-        let lane_width = 50.0;
-        let tolerance = lane_width / 2.0 - 5.0;
-        
+        // Westbound: top half of E/W road — y = 425, 375, 325
+        let target_y = 425.0 - (self.assigned_lane as f32 * 50.0);
+        let tolerance = 20.0;
         if (self.position.1 - target_y).abs() > tolerance {
             self.position.1 = target_y;
         }
