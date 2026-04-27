@@ -16,7 +16,7 @@ pub struct Renderer {
 }
 
 const LANE_WIDTH: i32 = 50;
-const LANE_COUNT: usize = 3; // 3 lanes per direction (left, straight, right)
+const LANE_COUNT: usize = 6; // 6 lanes total: 3 outgoing + 3 incoming per road
 const DASHED_LINE_LENGTH: i32 = 10;
 const DASHED_LINE_GAP: i32 = 10;
 
@@ -84,16 +84,20 @@ impl Renderer {
         // Draw lanes with markings
         self.draw_lanes_vertical(road_start_x, 0, road_width as i32, center_y - size, true)?;
 
-        // Draw lane labels (Left, Straight, Right)
+        // Labels and arrows for southbound incoming lanes (left 3)
         let label_y = center_y - size - 40;
-        self.draw_text_simple(road_start_x + LANE_WIDTH / 2 - 5, label_y, "l")?;
+        let half = (LANE_COUNT as i32 / 2) * LANE_WIDTH; // 150
+        self.draw_text_simple(road_start_x + LANE_WIDTH / 2 - 5, label_y, "r")?;
         self.draw_text_simple(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH - 5, label_y, "s")?;
-        self.draw_text_simple(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH * 2 - 5, label_y, "r")?;
-
-        // Draw direction arrows
+        self.draw_text_simple(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH * 2 - 5, label_y, "l")?;
         self.draw_arrow_down(road_start_x + LANE_WIDTH / 2, label_y + 15)?;
         self.draw_arrow_down(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH, label_y + 15)?;
         self.draw_arrow_down(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH * 2, label_y + 15)?;
+
+        // Arrows for northbound outgoing lanes (right 3)
+        self.draw_arrow_up(road_start_x + half + LANE_WIDTH / 2, label_y + 15)?;
+        self.draw_arrow_up(road_start_x + half + LANE_WIDTH / 2 + LANE_WIDTH, label_y + 15)?;
+        self.draw_arrow_up(road_start_x + half + LANE_WIDTH / 2 + LANE_WIDTH * 2, label_y + 15)?;
 
         Ok(())
     }
@@ -111,16 +115,20 @@ impl Renderer {
         // Draw lanes with markings
         self.draw_lanes_vertical(road_start_x, road_start_y, road_width as i32, self.height as i32 - road_start_y, true)?;
 
-        // Draw lane labels (but reversed for southbound: r, s, l from left to right visually)
+        // Labels and arrows for northbound incoming lanes (right 3)
         let label_y = road_start_y + 30;
-        self.draw_text_simple(road_start_x + LANE_WIDTH / 2 - 5, label_y, "r")?;
-        self.draw_text_simple(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH - 5, label_y, "s")?;
-        self.draw_text_simple(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH * 2 - 5, label_y, "l")?;
+        let half = (LANE_COUNT as i32 / 2) * LANE_WIDTH; // 150
+        self.draw_text_simple(road_start_x + half + LANE_WIDTH / 2 - 5, label_y, "l")?;
+        self.draw_text_simple(road_start_x + half + LANE_WIDTH / 2 + LANE_WIDTH - 5, label_y, "s")?;
+        self.draw_text_simple(road_start_x + half + LANE_WIDTH / 2 + LANE_WIDTH * 2 - 5, label_y, "r")?;
+        self.draw_arrow_up(road_start_x + half + LANE_WIDTH / 2, label_y - 15)?;
+        self.draw_arrow_up(road_start_x + half + LANE_WIDTH / 2 + LANE_WIDTH, label_y - 15)?;
+        self.draw_arrow_up(road_start_x + half + LANE_WIDTH / 2 + LANE_WIDTH * 2, label_y - 15)?;
 
-        // Draw direction arrows
-        self.draw_arrow_up(road_start_x + LANE_WIDTH / 2, label_y - 15)?;
-        self.draw_arrow_up(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH, label_y - 15)?;
-        self.draw_arrow_up(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH * 2, label_y - 15)?;
+        // Arrows for southbound outgoing lanes (left 3)
+        self.draw_arrow_down(road_start_x + LANE_WIDTH / 2, label_y - 15)?;
+        self.draw_arrow_down(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH, label_y - 15)?;
+        self.draw_arrow_down(road_start_x + LANE_WIDTH / 2 + LANE_WIDTH * 2, label_y - 15)?;
 
         Ok(())
     }
@@ -138,16 +146,20 @@ impl Renderer {
         // Draw lanes with markings
         self.draw_lanes_horizontal(road_start_x, road_start_y, self.width as i32 - road_start_x, road_height as i32, true)?;
 
-        // Draw lane labels (l, s, r from top to bottom)
+        // Labels and arrows for westbound incoming lanes (top 3)
         let label_x = road_start_x + 30;
-        self.draw_text_simple(label_x, road_start_y + LANE_WIDTH / 2 - 5, "l")?;
+        let half = (LANE_COUNT as i32 / 2) * LANE_WIDTH; // 150
+        self.draw_text_simple(label_x, road_start_y + LANE_WIDTH / 2 - 5, "r")?;
         self.draw_text_simple(label_x, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH - 5, "s")?;
-        self.draw_text_simple(label_x, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH * 2 - 5, "r")?;
-
-        // Draw direction arrows
+        self.draw_text_simple(label_x, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH * 2 - 5, "l")?;
         self.draw_arrow_left(label_x - 15, road_start_y + LANE_WIDTH / 2)?;
         self.draw_arrow_left(label_x - 15, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH)?;
         self.draw_arrow_left(label_x - 15, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH * 2)?;
+
+        // Arrows for eastbound outgoing lanes (bottom 3)
+        self.draw_arrow_right(label_x - 15, road_start_y + half + LANE_WIDTH / 2)?;
+        self.draw_arrow_right(label_x - 15, road_start_y + half + LANE_WIDTH / 2 + LANE_WIDTH)?;
+        self.draw_arrow_right(label_x - 15, road_start_y + half + LANE_WIDTH / 2 + LANE_WIDTH * 2)?;
 
         Ok(())
     }
@@ -165,41 +177,53 @@ impl Renderer {
         // Draw lanes with markings
         self.draw_lanes_horizontal(0, road_start_y, road_end_x, road_height as i32, true)?;
 
-        // Draw lane labels (r, s, l from top to bottom for westbound)
+        // Labels and arrows for eastbound incoming lanes (bottom 3)
         let label_x = road_end_x - 30;
-        self.draw_text_simple(label_x, road_start_y + LANE_WIDTH / 2 - 5, "r")?;
-        self.draw_text_simple(label_x, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH - 5, "s")?;
-        self.draw_text_simple(label_x, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH * 2 - 5, "l")?;
+        let half = (LANE_COUNT as i32 / 2) * LANE_WIDTH; // 150
+        self.draw_text_simple(label_x, road_start_y + half + LANE_WIDTH / 2 - 5, "l")?;
+        self.draw_text_simple(label_x, road_start_y + half + LANE_WIDTH / 2 + LANE_WIDTH - 5, "s")?;
+        self.draw_text_simple(label_x, road_start_y + half + LANE_WIDTH / 2 + LANE_WIDTH * 2 - 5, "r")?;
+        self.draw_arrow_right(label_x + 15, road_start_y + half + LANE_WIDTH / 2)?;
+        self.draw_arrow_right(label_x + 15, road_start_y + half + LANE_WIDTH / 2 + LANE_WIDTH)?;
+        self.draw_arrow_right(label_x + 15, road_start_y + half + LANE_WIDTH / 2 + LANE_WIDTH * 2)?;
 
-        // Draw direction arrows
-        self.draw_arrow_right(label_x + 15, road_start_y + LANE_WIDTH / 2)?;
-        self.draw_arrow_right(label_x + 15, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH)?;
-        self.draw_arrow_right(label_x + 15, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH * 2)?;
+        // Arrows for westbound outgoing lanes (top 3)
+        self.draw_arrow_left(label_x + 15, road_start_y + LANE_WIDTH / 2)?;
+        self.draw_arrow_left(label_x + 15, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH)?;
+        self.draw_arrow_left(label_x + 15, road_start_y + LANE_WIDTH / 2 + LANE_WIDTH * 2)?;
 
         Ok(())
     }
 
     fn draw_lanes_vertical(&mut self, start_x: i32, start_y: i32, width: i32, height: i32, _with_labels: bool) -> Result<(), Box<dyn std::error::Error>> {
-        // Draw vertical lane dividers (dashed white lines)
-        self.canvas.set_draw_color(Color::RGB(255, 255, 255));
-
         for i in 1..LANE_COUNT {
             let line_x = start_x + (i as i32) * LANE_WIDTH;
-            self.draw_dashed_line_vertical(line_x, start_y, start_y + height)?;
+            if i == LANE_COUNT / 2 {
+                // Solid yellow center divider separating outgoing from incoming traffic
+                self.canvas.set_draw_color(Color::RGB(255, 200, 0));
+                let rect = Rect::new(line_x - 1, start_y, 3, height as u32);
+                self.canvas.fill_rect(rect)?;
+            } else {
+                self.canvas.set_draw_color(Color::RGB(255, 255, 255));
+                self.draw_dashed_line_vertical(line_x, start_y, start_y + height)?;
+            }
         }
-
         Ok(())
     }
 
     fn draw_lanes_horizontal(&mut self, start_x: i32, start_y: i32, width: i32, height: i32, _with_labels: bool) -> Result<(), Box<dyn std::error::Error>> {
-        // Draw horizontal lane dividers (dashed white lines)
-        self.canvas.set_draw_color(Color::RGB(255, 255, 255));
-
         for i in 1..LANE_COUNT {
             let line_y = start_y + (i as i32) * LANE_WIDTH;
-            self.draw_dashed_line_horizontal(start_x, line_y, start_x + width)?;
+            if i == LANE_COUNT / 2 {
+                // Solid yellow center divider separating outgoing from incoming traffic
+                self.canvas.set_draw_color(Color::RGB(255, 200, 0));
+                let rect = Rect::new(start_x, line_y - 1, width as u32, 3);
+                self.canvas.fill_rect(rect)?;
+            } else {
+                self.canvas.set_draw_color(Color::RGB(255, 255, 255));
+                self.draw_dashed_line_horizontal(start_x, line_y, start_x + width)?;
+            }
         }
-
         Ok(())
     }
 
@@ -224,21 +248,36 @@ impl Renderer {
     }
 
     fn draw_intersection_lane_markings(&mut self, center_x: i32, center_y: i32, size: i32) -> Result<(), Box<dyn std::error::Error>> {
-        // Draw lane markings within the intersection
-        self.canvas.set_draw_color(Color::RGB(200, 200, 200));
+        let road_half = (LANE_WIDTH * LANE_COUNT as i32) / 2; // 150
 
         // Vertical lane dividers in intersection
         for i in 1..LANE_COUNT {
-            let line_x = center_x - (LANE_WIDTH * LANE_COUNT as i32 / 2) + (i as i32) * LANE_WIDTH;
-            let rect = Rect::new(line_x, center_y - size, 2, (size * 2) as u32);
-            self.canvas.fill_rect(rect)?;
+            let line_x = center_x - road_half + (i as i32) * LANE_WIDTH;
+            if i == LANE_COUNT / 2 {
+                // Solid yellow center divider
+                self.canvas.set_draw_color(Color::RGB(255, 200, 0));
+                let rect = Rect::new(line_x - 1, center_y - size, 3, (size * 2) as u32);
+                self.canvas.fill_rect(rect)?;
+            } else {
+                self.canvas.set_draw_color(Color::RGB(200, 200, 200));
+                let rect = Rect::new(line_x, center_y - size, 2, (size * 2) as u32);
+                self.canvas.fill_rect(rect)?;
+            }
         }
 
         // Horizontal lane dividers in intersection
         for i in 1..LANE_COUNT {
-            let line_y = center_y - (LANE_WIDTH * LANE_COUNT as i32 / 2) + (i as i32) * LANE_WIDTH;
-            let rect = Rect::new(center_x - size, line_y, (size * 2) as u32, 2);
-            self.canvas.fill_rect(rect)?;
+            let line_y = center_y - road_half + (i as i32) * LANE_WIDTH;
+            if i == LANE_COUNT / 2 {
+                // Solid yellow center divider
+                self.canvas.set_draw_color(Color::RGB(255, 200, 0));
+                let rect = Rect::new(center_x - size, line_y - 1, (size * 2) as u32, 3);
+                self.canvas.fill_rect(rect)?;
+            } else {
+                self.canvas.set_draw_color(Color::RGB(200, 200, 200));
+                let rect = Rect::new(center_x - size, line_y, (size * 2) as u32, 2);
+                self.canvas.fill_rect(rect)?;
+            }
         }
 
         Ok(())
