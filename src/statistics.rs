@@ -1,55 +1,37 @@
 use crate::vehicle::Vehicle;
+use nalgebra::DVector;
 use std::collections::HashSet;
 
 pub struct Statistics {
-    vehicle_count: u32,
-    max_velocity: f32,
-    min_velocity: f32,
-    max_time: f32,
-    min_time: f32,
+    velocities: Vec<f32>,
+    times: Vec<f32>,
     close_calls: u32,
     active_close_call_pairs: HashSet<(u32, u32)>,
-    first_vehicle: bool,
 }
 
 impl Statistics {
     pub fn new() -> Self {
         Statistics {
-            vehicle_count: 0,
-            max_velocity: 0.0,
-            min_velocity: f32::MAX,
-            max_time: 0.0,
-            min_time: f32::MAX,
+            velocities: Vec::new(),
+            times: Vec::new(),
             close_calls: 0,
             active_close_call_pairs: HashSet::new(),
-            first_vehicle: true,
         }
+    }
+
+    /// Records a single observation. Used by record_vehicle and by tests.
+    pub fn record_sample(&mut self, velocity: f32, time_in_intersection: f32) {
+        self.velocities.push(velocity);
+        self.times.push(time_in_intersection);
     }
 
     pub fn record_vehicle(&mut self, vehicle: &Vehicle) {
-        self.vehicle_count += 1;
-        // Use physics velocity (distance / time) as required by the spec,
-        // not the discrete velocity level at the moment of exit.
-        let velocity = vehicle.get_physics_velocity();
-        if velocity > self.max_velocity {
-            self.max_velocity = velocity;
-        }
-        if velocity < self.min_velocity {
-            self.min_velocity = velocity;
-        }
-        let time = vehicle.get_time_in_intersection();
-        if time > self.max_time {
-            self.max_time = time;
-        }
-        if time < self.min_time || self.first_vehicle {
-            self.min_time = time;
-        }
-        self.first_vehicle = false;
+        self.record_sample(
+            vehicle.get_physics_velocity(),
+            vehicle.get_time_in_intersection(),
+        );
     }
 
-    /// Called each frame with the set of vehicle-ID pairs currently in a close-call.
-    /// Increments the counter only for pairs that weren't already active last frame,
-    /// so each physical encounter is counted exactly once regardless of its duration.
     pub fn is_active_close_call(&self, pair: &(u32, u32)) -> bool {
         self.active_close_call_pairs.contains(pair)
     }
@@ -63,35 +45,120 @@ impl Statistics {
         self.active_close_call_pairs = current.clone();
     }
 
+    fn velocities_vec(&self) -> DVector<f32> {
+        DVector::from_row_slice(&self.velocities)
+    }
+
+    fn times_vec(&self) -> DVector<f32> {
+        DVector::from_row_slice(&self.times)
+    }
+
     pub fn get_vehicle_count(&self) -> u32 {
-        self.vehicle_count
+        self.velocities.len() as u32
     }
 
     pub fn get_max_velocity(&self) -> f32 {
-        self.max_velocity
+        if self.velocities.is_empty() { 0.0 } else { self.velocities_vec().max() }
     }
 
     pub fn get_min_velocity(&self) -> f32 {
-        if self.vehicle_count == 0 {
-            0.0
-        } else {
-            self.min_velocity
-        }
+        if self.velocities.is_empty() { 0.0 } else { self.velocities_vec().min() }
+    }
+
+    pub fn get_mean_velocity(&self) -> f32 {
+        if self.velocities.is_empty() { 0.0 } else { self.velocities_vec().mean() }
+    }
+
+    pub fn get_stddev_velocity(&self) -> f32 {
+        if self.velocities.is_empty() { 0.0 } else { self.velocities_vec().variance().sqrt() }
     }
 
     pub fn get_max_time(&self) -> f32 {
-        self.max_time
+        if self.times.is_empty() { 0.0 } else { self.times_vec().max() }
     }
 
     pub fn get_min_time(&self) -> f32 {
-        if self.vehicle_count == 0 {
-            0.0
-        } else {
-            self.min_time
-        }
+        if self.times.is_empty() { 0.0 } else { self.times_vec().min() }
+    }
+
+    pub fn get_mean_time(&self) -> f32 {
+        if self.times.is_empty() { 0.0 } else { self.times_vec().mean() }
+    }
+
+    pub fn get_stddev_time(&self) -> f32 {
+        if self.times.is_empty() { 0.0 } else { self.times_vec().variance().sqrt() }
     }
 
     pub fn get_close_calls(&self) -> u32 {
         self.close_calls
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx(a: f32, b: f32) -> bool { (a - b).abs() < 1e-4 }
+
+    #[test]
+    fn empty_statistics_returns_zeros() {
+        let s = Statistics::new();
+        assert_eq!(s.get_vehicle_count(), 0);
+        assert_eq!(s.get_max_velocity(), 0.0);
+        assert_eq!(s.get_min_velocity(), 0.0);
+        assert_eq!(s.get_mean_velocity(), 0.0);
+        assert_eq!(s.get_stddev_velocity(), 0.0);
+        assert_eq!(s.get_max_time(), 0.0);
+        assert_eq!(s.get_min_time(), 0.0);
+        assert_eq!(s.get_close_calls(), 0);
+    }
+
+    #[test]
+    fn single_sample_min_equals_max_equals_mean() {
+        let mut s = Statistics::new();
+        s.record_sample(42.0, 1.5);
+        assert_eq!(s.get_vehicle_count(), 1);
+        assert!(approx(s.get_max_velocity(), 42.0));
+        assert!(approx(s.get_min_velocity(), 42.0));
+        assert!(approx(s.get_mean_velocity(), 42.0));
+        assert!(approx(s.get_max_time(), 1.5));
+        assert!(approx(s.get_min_time(), 1.5));
+        assert!(approx(s.get_mean_time(), 1.5));
+        assert!(approx(s.get_stddev_velocity(), 0.0));
+    }
+
+    #[test]
+    fn multiple_samples_aggregate_correctly() {
+        let mut s = Statistics::new();
+        s.record_sample(10.0, 1.0);
+        s.record_sample(20.0, 2.0);
+        s.record_sample(30.0, 3.0);
+        assert_eq!(s.get_vehicle_count(), 3);
+        assert!(approx(s.get_max_velocity(), 30.0));
+        assert!(approx(s.get_min_velocity(), 10.0));
+        assert!(approx(s.get_mean_velocity(), 20.0));
+        assert!(approx(s.get_max_time(), 3.0));
+        assert!(approx(s.get_min_time(), 1.0));
+        assert!(approx(s.get_mean_time(), 2.0));
+        // population stddev of (10,20,30): sqrt(((-10)^2 + 0 + 10^2)/3) = sqrt(200/3)
+        assert!(approx(s.get_stddev_velocity(), (200.0_f32 / 3.0).sqrt()));
+    }
+
+    #[test]
+    fn close_calls_dedup_per_pair() {
+        let mut s = Statistics::new();
+        let mut frame_a = HashSet::new();
+        frame_a.insert((1u32, 2u32));
+        s.update_close_calls(&frame_a);
+        // Same pair on the next frame must not increment.
+        s.update_close_calls(&frame_a);
+        assert_eq!(s.get_close_calls(), 1);
+
+        // New pair appearing -> increment by one more.
+        let mut frame_b = HashSet::new();
+        frame_b.insert((1u32, 2u32));
+        frame_b.insert((3u32, 4u32));
+        s.update_close_calls(&frame_b);
+        assert_eq!(s.get_close_calls(), 2);
     }
 }

@@ -2,8 +2,12 @@ use sdl2::render::{Canvas, TextureCreator};
 use sdl2::video::Window;
 use sdl2::rect::Rect;
 use sdl2::pixels::Color;
+use nalgebra::Vector2;
 use crate::vehicle::Vehicle;
 use crate::intersection::Intersection;
+use crate::statistics::Statistics;
+use crate::glyphs::{glyph_for, text_width, Glyph, GLYPH_W, GLYPH_H, GLYPH_SPACING};
+use crate::summary::{window_origin, ok_button_rect, point_in_ok_button, WIN_W, WIN_H};
 
 pub struct Renderer {
     canvas: Canvas<Window>,
@@ -617,6 +621,179 @@ impl Renderer {
             }
             ox += 4;
         }
+        Ok(())
+    }
+
+    // ===== Pixel-text rendering (5x7 bitmap font, no SDL2_ttf required) =====
+
+    fn draw_glyph(
+        &mut self,
+        origin: Vector2<i32>,
+        g: &Glyph,
+        scale: i32,
+        color: Color,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.canvas.set_draw_color(color);
+        for (row_idx, row) in g.iter().enumerate() {
+            for col in 0..GLYPH_W {
+                // Bit GLYPH_W-1 = leftmost column.
+                let bit = (row >> (GLYPH_W - 1 - col)) & 1;
+                if bit == 1 {
+                    let x = origin.x + col * scale;
+                    let y = origin.y + (row_idx as i32) * scale;
+                    self.canvas.fill_rect(Rect::new(x, y, scale as u32, scale as u32))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn draw_text(
+        &mut self,
+        origin: Vector2<i32>,
+        text: &str,
+        scale: i32,
+        color: Color,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let advance = (GLYPH_W + GLYPH_SPACING) * scale;
+        for (i, c) in text.chars().enumerate() {
+            let pos = origin + Vector2::new(advance * i as i32, 0);
+            self.draw_glyph(pos, glyph_for(c), scale, color)?;
+        }
+        Ok(())
+    }
+
+    fn draw_text_centered_x(
+        &mut self,
+        center_x: i32,
+        y: i32,
+        text: &str,
+        scale: i32,
+        color: Color,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let w = text_width(text, scale);
+        self.draw_text(Vector2::new(center_x - w / 2, y), text, scale, color)
+    }
+
+    // ===== Final-stats dialog window =====
+
+    pub fn draw_summary(
+        &mut self,
+        stats: &Statistics,
+        total_time: f32,
+        mouse: (i32, i32),
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let canvas_size = Vector2::new(self.width as i32, self.height as i32);
+        let origin = window_origin(canvas_size);
+
+        // Dim backdrop covers whatever the simulation last rendered.
+        self.canvas.set_draw_color(Color::RGB(15, 15, 15));
+        self.canvas.fill_rect(Rect::new(0, 0, self.width, self.height))?;
+
+        // Outer border.
+        self.canvas.set_draw_color(Color::RGB(200, 200, 200));
+        self.canvas.fill_rect(Rect::new(origin.x, origin.y, WIN_W as u32, WIN_H as u32))?;
+
+        // Inner fill, inset by 2 px on each side.
+        self.canvas.set_draw_color(Color::RGB(30, 30, 30));
+        self.canvas.fill_rect(Rect::new(
+            origin.x + 2,
+            origin.y + 2,
+            (WIN_W - 4) as u32,
+            (WIN_H - 4) as u32,
+        ))?;
+
+        // Title strip.
+        let title_h = 30;
+        self.canvas.set_draw_color(Color::RGB(60, 60, 60));
+        self.canvas.fill_rect(Rect::new(
+            origin.x + 2,
+            origin.y + 2,
+            (WIN_W - 4) as u32,
+            title_h as u32,
+        ))?;
+        self.draw_text_centered_x(
+            origin.x + WIN_W / 2,
+            origin.y + 9,
+            "STATISTICS",
+            2,
+            Color::RGB(220, 220, 220),
+        )?;
+
+        // Stat rows.
+        let label_color = Color::RGB(180, 180, 180);
+        let value_color = Color::RGB(120, 220, 140);
+        let scale = 2;
+        let row_origin = origin + Vector2::new(28, 60);
+        let row_step = Vector2::new(0, 36);
+        let value_col_x = origin.x + WIN_W - 28; // right-edge for right-aligned values
+
+        let int_str = |v: u32| format!("{}", v);
+        let f_str = |v: f32| format!("{:.2}", v);
+
+        let rows: [(&str, String); 6] = [
+            ("MAX VEHICLES", int_str(stats.get_vehicle_count())),
+            ("MAX VELOCITY", f_str(stats.get_max_velocity())),
+            ("MIN VELOCITY", f_str(stats.get_min_velocity())),
+            ("MAX TIME",     f_str(stats.get_max_time())),
+            ("MIN TIME",     f_str(stats.get_min_time())),
+            ("CLOSE CALLS",  int_str(stats.get_close_calls())),
+        ];
+
+        for (i, (label, value)) in rows.iter().enumerate() {
+            let p = row_origin + row_step * (i as i32);
+            self.draw_text(p, label, scale, label_color)?;
+            // Right-align the value column.
+            let vw = text_width(value, scale);
+            self.draw_text(
+                Vector2::new(value_col_x - vw, p.y),
+                value,
+                scale,
+                value_color,
+            )?;
+        }
+
+        // Session-duration footer line, just above the OK button.
+        let footer = format!("SESSION {:.1} S", total_time);
+        self.draw_text_centered_x(
+            origin.x + WIN_W / 2,
+            origin.y + WIN_H - 70,
+            &footer,
+            1,
+            Color::RGB(140, 140, 140),
+        )?;
+
+        // OK button (with hover feedback).
+        let btn = ok_button_rect(canvas_size);
+        let hovered = point_in_ok_button(canvas_size, mouse.0, mouse.1);
+        let btn_fill = if hovered { Color::RGB(90, 90, 90) } else { Color::RGB(60, 60, 60) };
+
+        // 1px light border, then fill inset by 1px.
+        self.canvas.set_draw_color(Color::RGB(200, 200, 200));
+        self.canvas.fill_rect(btn)?;
+        self.canvas.set_draw_color(btn_fill);
+        self.canvas.fill_rect(Rect::new(
+            btn.x() + 1,
+            btn.y() + 1,
+            btn.width() - 2,
+            btn.height() - 2,
+        ))?;
+
+        // OK label centered in the button.
+        let ok_text = "OK";
+        let ok_scale = 2;
+        let ok_w = text_width(ok_text, ok_scale);
+        let ok_h = GLYPH_H * ok_scale;
+        self.draw_text(
+            Vector2::new(
+                btn.x() + (btn.width() as i32 - ok_w) / 2,
+                btn.y() + (btn.height() as i32 - ok_h) / 2,
+            ),
+            ok_text,
+            ok_scale,
+            Color::RGB(220, 220, 220),
+        )?;
+
         Ok(())
     }
 }
