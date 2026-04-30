@@ -11,10 +11,11 @@ mod glyphs;
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use sdl2::mouse::MouseButton;
+use sdl2::image::{self, InitFlag, LoadTexture};
 use std::time::{Duration, Instant};
 use vehicle::Vehicle;
 use intersection::{Intersection, Direction};
-use renderer::Renderer;
+use renderer::{Renderer, CarTextures};
 use input::InputHandler;
 use statistics::Statistics;
 
@@ -30,6 +31,7 @@ const FPS: u32 = 60;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sdl_context = sdl2::init()?;
+    let _image_context = image::init(InitFlag::PNG)?;
     let video_subsystem = sdl_context.video()?;
 
     let window = video_subsystem
@@ -41,6 +43,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let texture_creator = canvas.texture_creator();
 
     let mut renderer = Renderer::new(canvas, &texture_creator, WINDOW_WIDTH, WINDOW_HEIGHT)?;
+    let car_textures = CarTextures {
+        north: texture_creator.load_texture("assets/car_up.png")?,
+        south: texture_creator.load_texture("assets/car_down.png")?,
+        east:  texture_creator.load_texture("assets/car_right.png")?,
+        west:  texture_creator.load_texture("assets/car_left.png")?,
+    };
     let mut input_handler = InputHandler::new();
     let mut event_pump = sdl_context.event_pump()?;
 
@@ -159,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 renderer.clear();
                 renderer.draw_intersection(&intersection)?;
                 for vehicle in &vehicles {
-                    renderer.draw_vehicle(vehicle)?;
+                    renderer.draw_vehicle(vehicle, &car_textures)?;
                     if debug_mode {
                         renderer.draw_vehicle_debug(vehicle)?;
                     }

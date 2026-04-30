@@ -1,13 +1,21 @@
-use sdl2::render::{Canvas, TextureCreator};
+use sdl2::render::{Canvas, Texture, TextureCreator};
 use sdl2::video::Window;
 use sdl2::rect::Rect;
 use sdl2::pixels::Color;
 use nalgebra::Vector2;
 use crate::vehicle::Vehicle;
-use crate::intersection::Intersection;
+use crate::intersection::{Intersection, Direction};
 use crate::statistics::Statistics;
 use crate::glyphs::{glyph_for, text_width, Glyph, GLYPH_W, GLYPH_H, GLYPH_SPACING};
 use crate::summary::{window_origin, ok_button_rect, point_in_ok_button, WIN_W, WIN_H};
+
+/// Holds one texture per cardinal direction for car sprites.
+pub struct CarTextures<'a> {
+    pub north: Texture<'a>,
+    pub south: Texture<'a>,
+    pub east:  Texture<'a>,
+    pub west:  Texture<'a>,
+}
 
 pub struct Renderer {
     canvas: Canvas<Window>,
@@ -382,24 +390,23 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn draw_vehicle(&mut self, vehicle: &Vehicle) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn draw_vehicle(&mut self, vehicle: &Vehicle, textures: &CarTextures<'_>) -> Result<(), Box<dyn std::error::Error>> {
         let pos = vehicle.get_position();
-        let x = pos.0;
-        let y = pos.1;
-        let width = 30.0;
-        let height = 15.0;
-        let angle = vehicle.get_animation_angle();
+        let x = pos.0 as i32;
+        let y = pos.1 as i32;
+        let w = 40u32;
+        let h = 40u32;
+        let dst = Rect::new(x - w as i32 / 2, y - h as i32 / 2, w, h);
 
-        let color = match vehicle.get_id() % 5 {
-            0 => Color::RGB(255, 0, 0),
-            1 => Color::RGB(0, 0, 255),
-            2 => Color::RGB(0, 255, 0),
-            3 => Color::RGB(255, 255, 0),
-            _ => Color::RGB(255, 0, 255),
+        let texture = match vehicle.get_direction() {
+            Direction::North => &textures.north,
+            Direction::South => &textures.south,
+            Direction::East  => &textures.east,
+            Direction::West  => &textures.west,
         };
 
-        // Draw a rotated rectangle representing the vehicle
-        self.draw_rotated_vehicle(x, y, width, height, angle, color)?;
+        self.canvas.copy(texture, None, dst)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         Ok(())
     }
