@@ -9,19 +9,47 @@ pub enum Route {
     Left,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug)]
 pub enum VelocityLevel {
-    Stopped,   // 0 pixels/frame - waiting for intersection to clear
-    Normal,    // 100 pixels/frame - standard operating speed
-    Fast,      // 160 pixels/frame - free flow speed
+    Stopped,        // 0 pixels/frame - waiting for intersection to clear
+    Slow,           // 50 pixels/frame - velocity-modulated approach speed
+    Normal,         // 100 pixels/frame - standard operating speed
+    Fast,           // 160 pixels/frame - free flow speed
+    Custom(f32),    // arbitrary px/frame set by ATW target velocity (>= CRAWL_SPEED)
+}
+
+impl PartialEq for VelocityLevel {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stopped,   Self::Stopped)   => true,
+            (Self::Slow,      Self::Slow)      => true,
+            (Self::Normal,    Self::Normal)    => true,
+            (Self::Fast,      Self::Fast)      => true,
+            (Self::Custom(a), Self::Custom(b)) => a.to_bits() == b.to_bits(),
+            _                                  => false,
+        }
+    }
+}
+
+impl Eq for VelocityLevel {}
+
+impl std::hash::Hash for VelocityLevel {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        if let Self::Custom(v) = self {
+            v.to_bits().hash(state);
+        }
+    }
 }
 
 impl VelocityLevel {
     pub fn to_pixels_per_frame(&self) -> f32 {
         match self {
-            VelocityLevel::Stopped => 0.0,
-            VelocityLevel::Normal => 100.0,
-            VelocityLevel::Fast => 160.0,
+            VelocityLevel::Stopped    => 0.0,
+            VelocityLevel::Slow       => 50.0,
+            VelocityLevel::Normal     => 100.0,
+            VelocityLevel::Fast       => 160.0,
+            VelocityLevel::Custom(v)  => *v,
         }
     }
 
@@ -261,6 +289,25 @@ impl Vehicle {
         self.route
     }
 
+    /// Permanently change this vehicle's intended route and remap its assigned lane.
+    /// The transverse axis position is snapped to the new lane centre immediately so
+    /// the per-frame lane-enforcement logic sees no large discontinuity.
+    pub fn set_route(&mut self, route: Route) {
+        self.route = route;
+        self.assigned_lane = match route {
+            Route::Left     => 0,
+            Route::Straight => 1,
+            Route::Right    => 2,
+        };
+        // Snap transverse position to new lane centre to prevent [LANE-SNAP] spam.
+        match self.direction {
+            Direction::North => self.position.0 = 725.0 + (self.assigned_lane as f32 * 50.0),
+            Direction::South => self.position.0 = 675.0 - (self.assigned_lane as f32 * 50.0),
+            Direction::East  => self.position.1 = 475.0 + (self.assigned_lane as f32 * 50.0),
+            Direction::West  => self.position.1 = 425.0 - (self.assigned_lane as f32 * 50.0),
+        }
+    }
+
     pub fn is_route_applied(&self) -> bool {
         self.route_applied
     }
@@ -278,6 +325,25 @@ impl Vehicle {
     pub fn set_velocity_level(&mut self, level: VelocityLevel) {
         self.velocity_level = level;
         self.velocity = level.to_pixels_per_frame();
+    }
+
+    /// Set a continuous modulated velocity (used by ATW target-velocity strategy).
+    /// Stores VelocityLevel::Custom(vel) so the exact value is observable by the
+    /// renderer and collision passes; fixed-level sentinel values are preserved.
+    pub fn set_modulated_velocity(&mut self, vel: f32) {
+        let v = vel.max(0.0);
+        self.velocity = v;
+        self.velocity_level = if v == 0.0 {
+            VelocityLevel::Stopped
+        } else if v == VelocityLevel::Slow.to_pixels_per_frame() {
+            VelocityLevel::Slow
+        } else if v == VelocityLevel::Normal.to_pixels_per_frame() {
+            VelocityLevel::Normal
+        } else if v >= VelocityLevel::Fast.to_pixels_per_frame() {
+            VelocityLevel::Fast
+        } else {
+            VelocityLevel::Custom(v)
+        };
     }
 
     pub fn get_time_in_intersection(&self) -> f32 {

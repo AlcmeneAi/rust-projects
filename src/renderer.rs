@@ -544,23 +544,29 @@ impl Renderer {
 
         // --- Safety-distance circle ---
         let radius = match vehicle.get_velocity_level() {
-            VelocityLevel::Fast    => 120i32,
-            VelocityLevel::Normal  => 80i32,
-            VelocityLevel::Stopped => 50i32,
+            VelocityLevel::Fast      => 120i32,
+            VelocityLevel::Normal    => 80i32,
+            VelocityLevel::Slow      => 65i32,
+            VelocityLevel::Custom(_) => 55i32,   // crawling — tight bubble
+            VelocityLevel::Stopped   => 50i32,
         };
         let circle_color = match vehicle.get_velocity_level() {
-            VelocityLevel::Fast    => Color::RGB(0, 200, 0),   // green
-            VelocityLevel::Normal  => Color::RGB(200, 200, 0), // yellow
-            VelocityLevel::Stopped => Color::RGB(255, 0, 0),   // red
+            VelocityLevel::Fast      => Color::RGB(0, 200, 0),     // green
+            VelocityLevel::Normal    => Color::RGB(200, 200, 0),   // yellow
+            VelocityLevel::Slow      => Color::RGB(255, 140, 0),   // yellow-orange
+            VelocityLevel::Custom(_) => Color::RGB(220, 60, 0),    // deep orange (crawl)
+            VelocityLevel::Stopped   => Color::RGB(255, 0, 0),     // red
         };
         self.draw_circle(cx, cy, radius, circle_color)?;
 
         // --- Velocity label (single character for readability) ---
         let label_color = Color::RGB(255, 255, 255);
         let label = match vehicle.get_velocity_level() {
-            VelocityLevel::Fast    => "F",
-            VelocityLevel::Normal  => "N",
-            VelocityLevel::Stopped => "X",
+            VelocityLevel::Fast      => "F",
+            VelocityLevel::Normal    => "N",
+            VelocityLevel::Slow      => "S",
+            VelocityLevel::Custom(_) => "C",
+            VelocityLevel::Stopped   => "X",
         };
         // Draw tiny 3×5 pixel letter by sampling a hard-coded bitmap
         self.draw_debug_label(cx, cy - hh - 10, vehicle.get_id(), label, label_color)?;
