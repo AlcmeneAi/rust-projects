@@ -21,9 +21,10 @@ const CLOSE_CALL_DISTANCE: f32 = 60.0;
 // so they never fully halt due to a computed target velocity (Pass 3 still stops them
 // on hard physical contact via SAFETY_DISTANCE_STOP).
 const CRAWL_SPEED: f32 = 20.0;
-// Minimum distance to intersection entry at which a route change is still permitted.
-// Closer than this the vehicle is too committed to its lane to redirect safely.
-const COURSE_CORRECTION_DIST: f32 = 200.0;
+// Approach zone thresholds: distance from intersection entry edge (pixels).
+// Yielding vehicles drop to Slow below CRAWL_ZONE; priority vehicles cap at Normal below SLOW_ZONE.
+const APPROACH_CRAWL_ZONE: f32 = 80.0;
+const APPROACH_SLOW_ZONE: f32 = 200.0;
 
 pub fn check_collisions_and_apply_strategy(
     vehicles: &mut Vec<Vehicle>,
@@ -34,225 +35,80 @@ pub fn check_collisions_and_apply_strategy(
     // prints compare against the true start-of-frame state, not Pass-1's overwrite.
     let prev_levels: Vec<VelocityLevel> = vehicles.iter().map(|v| v.get_velocity_level()).collect();
 
-    // Pass 0 — Course Correction:
-    // Before making any velocity decision, check whether a vehicle heading for a
-    // window-overlap conflict can side-step it entirely by switching routes.
-    // The change is permanent (set_route updates lane + snaps position), so it only
-    // fires once per vehicle: after the first successful reroute all subsequent frames
-    // see no overlap with the new route and the block is a no-op.
-    //
-    // Eligibility: approaching (outside intersection), not yet turned, and still
-    // far enough from the entry edge to switch lanes safely (> COURSE_CORRECTION_DIST).
-    //
-    // Route candidates are tried in order: Right first (shortest path, no cross-
-    // traffic conflicts for any direction), then Left, then Straight.  The first
-    // candidate that produces zero conflicts against every vehicle in the scene wins.
-    for i in 0..vehicles.len() {
-        let pos_i   = vehicles[i].get_position();
-        let dir_i   = vehicles[i].get_direction();
-        let route_i = vehicles[i].get_route();
-
-        if vehicles[i].is_route_applied() { continue; }
-        if intersection.contains_point(pos_i) { continue; }
-        if !is_in_or_near_intersection(pos_i, intersection, ETA_LOOKAHEAD) { continue; }
-
-        let dist = dist_to_entry_edge(pos_i, dir_i, intersection);
-        if dist <= COURSE_CORRECTION_DIST { continue; }
-
-        let my_id   = vehicles[i].get_id();
-        let hyp_vel = VelocityLevel::Fast.to_pixels_per_frame();
-        let my_win  = compute_time_window(pos_i, dir_i, route_i, hyp_vel, false, intersection);
-
-        // Find the first j whose window overlaps ours on a conflicting path.
-        let mut trigger_j_id: Option<u32> = None;
-        for j in 0..vehicles.len() {
-            if i == j { continue; }
-            if vehicles[j].is_route_applied() { continue; }
-
-            let pos_j   = vehicles[j].get_position();
-            let dir_j   = vehicles[j].get_direction();
-            let route_j = vehicles[j].get_route();
-            let vel_j   = vehicles[j].get_velocity();
-
-            if !is_in_or_near_intersection(pos_j, intersection, ETA_LOOKAHEAD) { continue; }
-            if !will_paths_conflict(dir_i, route_i, dir_j, route_j) { continue; }
-
-            let in_isect_j = intersection.contains_point(pos_j);
-            let vel_j_w    = if vel_j > 0.0 { vel_j } else { hyp_vel };
-            let j_win      = compute_time_window(pos_j, dir_j, route_j, vel_j_w, in_isect_j, intersection);
-
-            if windows_overlap(my_win, j_win) {
-                trigger_j_id = Some(vehicles[j].get_id());
-                break;
-            }
-        }
-
-        let j_id = match trigger_j_id {
-            Some(id) => id,
-            None     => continue, // no conflict detected — nothing to correct
-        };
-
-        // Try alternative routes: Right (safest) → Left → Straight.
-        // Accept the first that introduces zero path conflicts with every peer.
-        const CANDIDATES: [Route; 3] = [Route::Right, Route::Left, Route::Straight];
-        for &alt in &CANDIDATES {
-            if alt == route_i { continue; }
-
-            let any_new_conflict = (0..vehicles.len()).any(|j| {
-                if j == i { return false; }
-                if vehicles[j].is_route_applied() { return false; }
-                let pos_j = vehicles[j].get_position();
-                let dir_j = vehicles[j].get_direction();
-                let route_j = vehicles[j].get_route();
-                if !is_in_or_near_intersection(pos_j, intersection, ETA_LOOKAHEAD) { return false; }
-                will_paths_conflict(dir_i, alt, dir_j, route_j)
-            });
-
-            if !any_new_conflict {
-                eprintln!(
-                    "[COURSE CHANGE] id={} changed route {:?}->{:?} to avoid id={}",
-                    my_id, route_i, alt, j_id
-                );
-                vehicles[i].set_route(alt);
-                break;
-            }
-        }
-    }
-
-    // Pass 1 — Arrival-Time-Window (ATW) velocity control:
-    // Instead of stopping every vehicle that shares a near-zone with a conflicting peer,
-    // we only stop a vehicle when its crossing time window OVERLAPS with a conflicting
-    // vehicle’s window.  Non-overlapping pairs proceed at full speed with zero delay.
-    //
-    // For each approaching vehicle:
-    //   eta_entry = dist_to_entry_edge / velocity
-    //   window    = [eta_entry − BUFFER, eta_entry + crossing_distance/vel + BUFFER]
-    //
-    // When two conflicting paths have overlapping windows the farther vehicle (larger eta)
-    // must stop.  Tiebreak: lower ID has priority.
+    // Pass 1 — Closest-to-intersection wins:
+    // Each approaching vehicle checks all conflicting peers. Whoever is physically
+    // closer to the intersection entry edge has priority and proceeds at full speed.
+    // The farther vehicle yields by slowing down. Vehicles already inside always
+    // have top priority. Approach speed is graded: Fast → Normal as
+    // the vehicle enters the slow-down zone near the intersection.
     for i in 0..vehicles.len() {
         let pos_i    = vehicles[i].get_position();
         let dir_i    = vehicles[i].get_direction();
         let route_i  = vehicles[i].get_route();
         let exited_i = vehicles[i].is_route_applied();
-        let in_isect_i   = intersection.contains_point(pos_i);
-        let in_lookahead = is_in_or_near_intersection(pos_i, intersection, ETA_LOOKAHEAD);
+        let in_isect_i = intersection.contains_point(pos_i);
 
-        // Outside planning horizon or already completed turn → free speed.
-        if !in_lookahead || exited_i {
+        // Already turned / outside planning horizon → free speed.
+        if exited_i || !is_in_or_near_intersection(pos_i, intersection, ETA_LOOKAHEAD) {
             vehicles[i].set_velocity_level(VelocityLevel::Fast);
             continue;
         }
 
-        // Inside the intersection box and not yet turned → caution speed, absolute priority.
+        // Inside the intersection and not yet turned → Normal speed, highest priority.
         if in_isect_i {
             vehicles[i].set_velocity_level(VelocityLevel::Normal);
             continue;
         }
 
-        // Approaching: compute window at the vehicle's ACTUAL current velocity so that
-        // as it slows down its projected arrival time moves further into the future,
-        // allowing the peer that was blocked to receive an earlier green signal.
-        // Fall back to hyp_vel only when the vehicle is fully stopped so it still gets
-        // a real window for re-evaluation every frame.
-        let hyp_vel   = VelocityLevel::Fast.to_pixels_per_frame();
-        let actual_vel_i = vehicles[i].get_velocity();
-        let i_eval_vel   = if actual_vel_i > 0.0 { actual_vel_i } else { hyp_vel };
-        let my_window = compute_time_window(pos_i, dir_i, route_i, i_eval_vel, false, intersection);
-        let my_eta    = dist_to_entry_edge(pos_i, dir_i, intersection) / i_eval_vel;
-        let my_id     = vehicles[i].get_id();
+        let dist_i = dist_to_entry_edge(pos_i, dir_i, intersection);
+        let my_id  = vehicles[i].get_id();
 
-        // should_force_stop: j is inside and stopped — no modulation possible.
-        // conflict_j_window: j's time window when our windows overlap with a higher-priority j.
-        let mut should_force_stop: bool               = false;
-        let mut conflict_j_window: Option<(f32, f32)> = None;
-        let mut stop_reason_id: Option<u32>           = None;
-
-        'conflict_scan: for j in 0..vehicles.len() {
+        // Check all conflicting peers — yield if any peer is closer (or inside).
+        let mut must_yield = false;
+        for j in 0..vehicles.len() {
             if i == j { continue; }
-            if vehicles[j].is_route_applied() { continue; } // turned → no longer conflicts
+            if vehicles[j].is_route_applied() { continue; }
 
             let pos_j      = vehicles[j].get_position();
             let dir_j      = vehicles[j].get_direction();
             let route_j    = vehicles[j].get_route();
-            let vel_j      = vehicles[j].get_velocity();
             let in_isect_j = intersection.contains_point(pos_j);
 
             if !is_in_or_near_intersection(pos_j, intersection, ETA_LOOKAHEAD) { continue; }
             if !will_paths_conflict(dir_i, route_i, dir_j, route_j) { continue; }
 
-            let j_id = vehicles[j].get_id();
-
-            // j is inside the intersection and stopped → occupies it indefinitely.
-            if in_isect_j && vel_j <= 0.0 {
-                should_force_stop = true;
-                stop_reason_id    = Some(j_id);
-                break 'conflict_scan;
+            // Any vehicle already inside has absolute priority.
+            if in_isect_j {
+                must_yield = true;
+                break;
             }
 
-            // Compute j’s window (use actual vel if moving, else Fast as upper bound).
-            let vel_j_w  = if vel_j > 0.0 { vel_j } else { hyp_vel };
-            let j_window = compute_time_window(pos_j, dir_j, route_j, vel_j_w, in_isect_j, intersection);
+            let dist_j = dist_to_entry_edge(pos_j, dir_j, intersection);
+            let j_id   = vehicles[j].get_id();
 
-            if !windows_overlap(my_window, j_window) {
-                continue; // no temporal conflict — both can proceed freely
-            }
-
-            // Windows overlap → lower eta wins; tiebreak by lower ID.
-            let j_eta = if in_isect_j {
-                -1.0_f32 // already inside = highest priority
-            } else {
-                let v = if vel_j > 0.0 { vel_j } else { hyp_vel };
-                dist_to_entry_edge(pos_j, dir_j, intersection) / v
-            };
-
-            if !(my_eta < j_eta || (my_eta == j_eta && my_id < j_id)) {
-                conflict_j_window = Some(j_window);
-                stop_reason_id    = Some(j_id);
-                break 'conflict_scan;
+            // j is closer (or equal distance with lower ID) → i must yield.
+            if dist_j < dist_i || (dist_j == dist_i && j_id < my_id) {
+                must_yield = true;
+                break;
             }
         }
 
-        let dist = dist_to_entry_edge(pos_i, dir_i, intersection);
-
-        if should_force_stop {
-            // j is inside the intersection and stationary — it has no predictable exit time.
-            // Rather than halting, creep at CRAWL_SPEED; Pass 3 will stop vehicle i
-            // via the hard physical gap (SAFETY_DISTANCE_STOP) if it actually closes in.
-            let prev_vel = vehicles[i].get_velocity();
-            if (prev_vel - CRAWL_SPEED).abs() > 0.5 {
-                eprintln!(
-                    "[ATW P1] id={} CRAWL (blocked by stopped id={:?}, dist={:.1})",
-                    my_id, stop_reason_id, dist
-                );
-            }
-            vehicles[i].set_modulated_velocity(CRAWL_SPEED);
-        } else if let Some(j_win) = conflict_j_window {
-            // Target Velocity: compute a speed so our eta_entry arrives exactly after j's
-            // exit window.  j_win.1 already carries one WINDOW_BUFFER_SECS on j's side;
-            // we add another to guarantee clearance.
-            // Formula: Target_Vel = dist_to_entry(i) / (j_exit_time + WINDOW_BUFFER_SECS)
-            // Floor at CRAWL_SPEED — the vehicle always keeps moving.
-            let target_vel = if dist > 0.0 && j_win.1 + WINDOW_BUFFER_SECS > 0.0 {
-                dist / (j_win.1 + WINDOW_BUFFER_SECS)
+        let new_level = if must_yield {
+            // Yield: slow more the closer we are to the entry.
+            if dist_i < APPROACH_CRAWL_ZONE {
+                VelocityLevel::Slow
             } else {
-                CRAWL_SPEED
-            };
-            let clamped = target_vel.clamp(CRAWL_SPEED, hyp_vel);
-            eprintln!(
-                "[ATW P1] id={} TARGET vel={:.1} (raw={:.1}, dist={:.1}) for id={:?}",
-                my_id, clamped, target_vel, dist, stop_reason_id
-            );
-            vehicles[i].set_modulated_velocity(clamped);
+                VelocityLevel::Normal
+            }
         } else {
-            if matches!(
-                vehicles[i].get_velocity_level(),
-                VelocityLevel::Stopped | VelocityLevel::Normal | VelocityLevel::Slow | VelocityLevel::Custom(_)
-            ) {
-                eprintln!("[ATW P1] id={} CLEARED pos=({:.0},{:.0})", my_id, pos_i.0, pos_i.1);
+            // Has priority: grade approach speed as we near the intersection.
+            if dist_i < APPROACH_SLOW_ZONE {
+                VelocityLevel::Normal
+            } else {
+                VelocityLevel::Fast
             }
-            vehicles[i].set_velocity_level(VelocityLevel::Fast);
-        }
+        };
+        vehicles[i].set_velocity_level(new_level);
     }
 
     // Pass 2: reduce velocity for at-risk pairs — set Normal for conflicting vehicles;
@@ -556,6 +412,53 @@ fn windows_overlap(a: (f32, f32), b: (f32, f32)) -> bool {
     a.0 < b.1 && b.0 < a.1
 }
 
+// === Public ATW prediction API ===
+
+/// Return a vehicle's projected intersection-occupancy time window `(entry_t, exit_t)` in
+/// seconds relative to now, padded by `WINDOW_BUFFER_SECS` on each side.
+///
+/// The calculation uses the vehicle's **actual current velocity** so that the window
+/// automatically shifts later as the vehicle decelerates.
+///
+/// * Vehicles already inside the intersection receive `entry_t = -WINDOW_BUFFER_SECS`
+///   (they have priority); `exit_t` is derived from distance remaining to exit edge.
+/// * Vehicles outside but with `velocity == 0` receive `(f32::MAX, f32::MAX)` — no
+///   meaningful future window can be computed.
+///
+/// Formula:
+/// $$t_{entry} = \frac{d_{entry}}{v} - B,\quad t_{exit} = \frac{d_{entry} + d_{cross}}{v} + B$$
+/// where $B$ = `WINDOW_BUFFER_SECS`.
+pub fn vehicle_time_window(v: &Vehicle, intersection: &Intersection) -> (f32, f32) {
+    let pos      = v.get_position();
+    let vel      = v.get_velocity();
+    let in_isect = intersection.contains_point(pos);
+    compute_time_window(pos, v.get_direction(), v.get_route(), vel, in_isect, intersection)
+}
+
+/// Return `true` when two half-open time windows `[a.0, a.1)` and `[b.0, b.1)` overlap.
+///
+/// $$\text{overlap} \iff a_0 < b_1 \land b_0 < a_1$$
+pub fn check_overlap(window_a: (f32, f32), window_b: (f32, f32)) -> bool {
+    windows_overlap(window_a, window_b)
+}
+
+/// Predict whether vehicles `a` and `b` will conflict at the intersection.
+///
+/// Returns `true` when **both** conditions hold:
+/// 1. `will_paths_conflict` — the vehicles' physical paths cross inside the intersection.
+/// 2. `check_overlap`       — their projected time windows overlap, meaning they are
+///    predicted to occupy the crossing region at the same time.
+///
+/// This is the primary entry point for ATW conflict detection from outside this module.
+pub fn predict_atw_conflict(a: &Vehicle, b: &Vehicle, intersection: &Intersection) -> bool {
+    if !will_paths_conflict(a.get_direction(), a.get_route(), b.get_direction(), b.get_route()) {
+        return false;
+    }
+    let win_a = vehicle_time_window(a, intersection);
+    let win_b = vehicle_time_window(b, intersection);
+    check_overlap(win_a, win_b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,8 +527,8 @@ mod tests {
         // FIX (Task 4):        baseline runs FIRST → safety pass reduces follower from Fast to Normal
         // Vehicle::new initializes velocity_level to Normal, so required_safety_distance=70.0 during
         // the current (buggy) pass 3 — gap 50px < 70px triggers reduction, then baseline overrides to Fast.
-        let mut leader = Vehicle::new(0, Direction::North, Route::Straight);
-        let mut follower = Vehicle::new(1, Direction::North, Route::Straight);
+        let mut leader   = Vehicle::new(0, Direction::North, Route::Straight);
+        let mut follower  = Vehicle::new(1, Direction::North, Route::Straight);
         leader.set_position(700.0, 870.0);   // ahead (North moves toward smaller y, so leader has smaller y)
         follower.set_position(700.0, 920.0); // 50px behind leader
         let mut vehicles = vec![leader, follower];
@@ -645,7 +548,7 @@ mod tests {
         // Windows overlap (both short eta, crossing=400px) → North has lower eta → North proceeds,
         // East stops.
         let mut north = Vehicle::new(0, Direction::North, Route::Straight);
-        let mut east  = Vehicle::new(1, Direction::East,  Route::Straight);
+        let mut east  = Vehicle::new(1, Direction::East, Route::Straight);
         north.set_position(700.0, 700.0);
         east.set_position(400.0, 450.0);
         let mut vehicles = vec![north, east];
@@ -653,5 +556,99 @@ mod tests {
         check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
         assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Fast,    "North (closer) should proceed at Fast");
         assert_eq!(vehicles[1].get_velocity_level(), VelocityLevel::Stopped, "East (farther) should stop and yield");
+    }
+
+    // --- Public ATW API unit tests ---
+
+    #[test]
+    fn check_overlap_non_overlapping_windows() {
+        assert!(!check_overlap((0.0, 1.0), (2.0, 3.0)));
+        assert!(!check_overlap((2.0, 3.0), (0.0, 1.0)));
+    }
+
+    #[test]
+    fn check_overlap_touching_windows_are_not_overlapping() {
+        // [0,1) and [1,2) share only the boundary — not considered overlapping.
+        assert!(!check_overlap((0.0, 1.0), (1.0, 2.0)));
+    }
+
+    #[test]
+    fn check_overlap_overlapping_windows() {
+        assert!(check_overlap((0.0, 2.0), (1.0, 3.0)));
+        assert!(check_overlap((1.0, 3.0), (0.0, 2.0)));
+        // One window fully inside the other
+        assert!(check_overlap((0.0, 10.0), (2.0, 5.0)));
+    }
+
+    #[test]
+    fn vehicle_time_window_approaching_vehicle() {
+        // North/Straight at y=850: dist_to_entry = 850-(450+200) = 200px
+        // vel = Fast = 160 px/frame; crossing = 400px
+        // entry_t = 200/160 - 0.3 = 1.25 - 0.3 = 0.95
+        // exit_t  = (200+400)/160 + 0.3 = 3.75 + 0.3 = 4.05
+        let mut v = Vehicle::new(0, Direction::North, Route::Straight);
+        v.set_position(700.0, 850.0);
+        v.set_velocity_level(VelocityLevel::Fast);
+        let (entry_t, exit_t) = vehicle_time_window(&v, &make_intersection());
+        let eps = 0.01;
+        assert!((entry_t - 0.95).abs() < eps, "entry_t={entry_t}");
+        assert!((exit_t  - 4.05).abs() < eps, "exit_t={exit_t}");
+    }
+
+    #[test]
+    fn vehicle_time_window_stopped_outside_returns_max() {
+        let mut v = Vehicle::new(0, Direction::North, Route::Straight);
+        v.set_position(700.0, 850.0);
+        v.set_velocity_level(VelocityLevel::Stopped);
+        let (entry_t, exit_t) = vehicle_time_window(&v, &make_intersection());
+        assert_eq!(entry_t, f32::MAX);
+        assert_eq!(exit_t,  f32::MAX);
+    }
+
+    #[test]
+    fn vehicle_time_window_inside_intersection() {
+        // Vehicle already inside: entry_t = -WINDOW_BUFFER_SECS = -0.3
+        let mut v = Vehicle::new(0, Direction::North, Route::Straight);
+        v.set_position(700.0, 450.0);  // intersection centre
+        v.set_velocity_level(VelocityLevel::Normal);
+        let (entry_t, _exit_t) = vehicle_time_window(&v, &make_intersection());
+        let eps = 0.001;
+        assert!((entry_t - (-WINDOW_BUFFER_SECS)).abs() < eps, "entry_t={entry_t}");
+    }
+
+    #[test]
+    fn predict_atw_conflict_non_conflicting_paths() {
+        // Two vehicles from the same direction: paths never cross.
+        let mut a = Vehicle::new(0, Direction::North, Route::Straight);
+        let mut b = Vehicle::new(1, Direction::North, Route::Right);
+        a.set_position(700.0, 850.0);
+        b.set_position(750.0, 900.0);
+        assert!(!predict_atw_conflict(&a, &b, &make_intersection()));
+    }
+
+    #[test]
+    fn predict_atw_conflict_conflicting_paths_overlapping_windows() {
+        // North/Straight and East/Straight — perpendicular paths, both close.
+        let mut north = Vehicle::new(0, Direction::North, Route::Straight);
+        let mut east  = Vehicle::new(1, Direction::East, Route::Straight);
+        north.set_position(700.0, 700.0);  // 50px from entry
+        east.set_position(400.0, 475.0);   // 100px from entry
+        north.set_velocity_level(VelocityLevel::Fast);
+        east.set_velocity_level(VelocityLevel::Fast);
+        assert!(predict_atw_conflict(&north, &east, &make_intersection()));
+    }
+
+    #[test]
+    fn predict_atw_conflict_conflicting_paths_non_overlapping_windows() {
+        // North is very close (nearly through); East is far away → windows don't overlap.
+        let mut north = Vehicle::new(0, Direction::North, Route::Straight);
+        let mut east  = Vehicle::new(1, Direction::East, Route::Straight);
+        // North at entry edge — exits quickly.
+        north.set_position(700.0, 652.0);   // ~2px from entry (450+200=650)
+        // East very far away — arrives much later.
+        east.set_position(-500.0, 475.0);
+        north.set_velocity_level(VelocityLevel::Fast);
+        east.set_velocity_level(VelocityLevel::Fast);
+        assert!(!predict_atw_conflict(&north, &east, &make_intersection()));
     }
 }

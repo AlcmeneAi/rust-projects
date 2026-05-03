@@ -12,9 +12,9 @@ pub enum Route {
 #[derive(Clone, Copy, Debug)]
 pub enum VelocityLevel {
     Stopped,        // 0 pixels/frame - waiting for intersection to clear
-    Slow,           // 50 pixels/frame - velocity-modulated approach speed
-    Normal,         // 100 pixels/frame - standard operating speed
-    Fast,           // 160 pixels/frame - free flow speed
+    Slow,           // 80 pixels/frame - velocity-modulated approach speed
+    Normal,         // 160 pixels/frame - standard operating speed
+    Fast,           // 260 pixels/frame - free flow speed
     Custom(f32),    // arbitrary px/frame set by ATW target velocity (>= CRAWL_SPEED)
 }
 
@@ -46,9 +46,9 @@ impl VelocityLevel {
     pub fn to_pixels_per_frame(&self) -> f32 {
         match self {
             VelocityLevel::Stopped    => 0.0,
-            VelocityLevel::Slow       => 50.0,
-            VelocityLevel::Normal     => 100.0,
-            VelocityLevel::Fast       => 160.0,
+            VelocityLevel::Slow       => 80.0,
+            VelocityLevel::Normal     => 160.0,
+            VelocityLevel::Fast       => 260.0,
             VelocityLevel::Custom(v)  => *v,
         }
     }
