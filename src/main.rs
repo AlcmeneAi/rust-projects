@@ -120,12 +120,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Hard caps that prevent lane pile-up under sustained random generation:
+        //   MAX_VEHICLES          — global limit; keeps the screen readable.
+        //   MAX_QUEUE_PER_DIR     — max vehicles still approaching/in intersection
+        //                          from one direction; prevents one lane backing up.
+        const MAX_VEHICLES: usize      = 12;
+        const MAX_QUEUE_PER_DIR: usize =  2;
+
         if state == AppState::Running {
-            if input_handler.should_generate_random() {
+            if input_handler.should_generate_random() && vehicles.len() < MAX_VEHICLES {
                 let direction = Direction::random();
-                // Per-direction cooldown: skip if a vehicle was recently spawned
-                // from this direction to avoid vehicles spawning on top of each other.
-                if input_handler.poll_random_spawn(direction) {
+                // Check per-direction queue depth BEFORE consuming the cooldown slot.
+                // is_route_applied() becomes true once the vehicle has cleared the
+                // intersection, so this counts only approaching/in-box vehicles.
+                let queued = vehicles.iter()
+                    .filter(|v| v.get_direction() == direction && !v.is_route_applied())
+                    .count();
+                if queued < MAX_QUEUE_PER_DIR && input_handler.poll_random_spawn(direction) {
                     let route = vehicle::Route::random();
                     let vehicle = Vehicle::new(vehicle_counter, direction, route);
                     vehicles.push(vehicle);

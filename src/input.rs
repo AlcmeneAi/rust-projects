@@ -33,7 +33,9 @@ impl InputHandler {
             last_key_time: std::time::Instant::now(),
             key_cooldown: std::time::Duration::from_millis(500),
             last_spawn_time: [epoch; 4],
-            spawn_cooldown: std::time::Duration::from_millis(800),
+            // 3 s between spawns per direction — matches intersection throughput
+            // (~0.8 vehicles/s capacity) so lanes don't back up over time.
+            spawn_cooldown: std::time::Duration::from_millis(3000),
         }
     }
 
