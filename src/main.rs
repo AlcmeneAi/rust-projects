@@ -58,7 +58,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut vehicles: Vec<Vehicle> = Vec::new();
     let mut statistics = Statistics::new();
-    let mut frame_count = 0;
     let mut vehicle_counter = 0u32;
     let mut total_time = 0.0f32;  // Total elapsed time in seconds
     let mut debug_mode = false;   // D key toggles hitbox/safety-radius overlay
@@ -108,7 +107,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Reset everything and go back to Running
                             vehicles.clear();
                             statistics.reset();
-                            frame_count = 0;
                             vehicle_counter = 0;
                             total_time = 0.0;
                             input_handler = InputHandler::new();
@@ -254,7 +252,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if state == AppState::Running {
             total_time += dt;
-            frame_count += 1;
         }
     }
 

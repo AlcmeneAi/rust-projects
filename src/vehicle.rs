@@ -315,6 +315,7 @@ impl Vehicle {
     /// Permanently change this vehicle's intended route and remap its assigned lane.
     /// The transverse axis position is snapped to the new lane centre immediately so
     /// the per-frame lane-enforcement logic sees no large discontinuity.
+    #[allow(dead_code)]
     pub fn set_route(&mut self, route: Route) {
         self.route = route;
         self.assigned_lane = match route {
@@ -512,6 +513,7 @@ impl Vehicle {
     /// vehicle enters the intersection box — before `apply_route_turn()` fires
     /// at the snap point.  This ties the visual rotation to position rather than
     /// to the discrete direction-change event.
+    #[allow(dead_code)]
     pub fn begin_turn_animation(&mut self) {
         if self.route_applied || self.route == Route::Straight {
             return;

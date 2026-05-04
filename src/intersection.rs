@@ -41,6 +41,7 @@ impl Intersection {
 
     /// True when the point is inside or within `padding` pixels of the intersection boundary.
     /// Used to detect when the smart intersection algorithm first notices a vehicle.
+    #[allow(dead_code)]
     pub fn is_near_or_in(&self, point: (f32, f32), padding: f32) -> bool {
         let dx = (point.0 - self.center.0).abs();
         let dy = (point.1 - self.center.1).abs();

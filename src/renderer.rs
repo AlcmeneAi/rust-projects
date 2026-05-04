@@ -499,7 +499,8 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draw a vehicle as a rotated rectangle
+    /// Extended debug overlay for a single vehicle. Shows:
+    #[allow(dead_code)]
     fn draw_rotated_vehicle(
         &mut self,
         center_x: f32,
@@ -566,6 +567,7 @@ impl Renderer {
     }
 
     /// Fill a rotated rectangle using scanline algorithm
+    #[allow(dead_code)]
     fn fill_rotated_rect_scanline(
         &mut self,
         corners: &[(i32, i32)],
@@ -995,6 +997,7 @@ impl Renderer {
     }
 
     /// Draw a tiny "id=N vel=L" label above the vehicle using small dots.
+    #[allow(dead_code)]
     fn draw_debug_label(&mut self, cx: i32, cy: i32, id: u32, vel: &str, color: Color) -> Result<(), Box<dyn std::error::Error>> {
         self.canvas.set_draw_color(color);
         // Just draw a small 4×4 pixel dot so it's visible without a font
@@ -1292,6 +1295,7 @@ impl Renderer {
             ),
             ok_label, btn_scale, Color::RGB(200, 205, 215))?;
 
+        let _ = cy; // consume final value — silences unused_assignments on macro-generated increments
         Ok(())
     }
 }
