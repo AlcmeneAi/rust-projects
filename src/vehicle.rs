@@ -89,6 +89,11 @@ pub struct Vehicle {
     intersection_distance: f32,    // Distance traveled in intersection (pixels)
     intersection_physics_velocity: f32,  // Calculated velocity = distance / time
     distance_at_intersection_entry: f32, // Odometer snapshot at intersection entry
+
+    // Turn signal
+    turn_signal_active: bool,      // True while approaching a Left/Right turn
+    turn_signal_blink_timer: f32,  // Accumulates dt to drive blink toggling
+    turn_signal_on: bool,          // Current blink state (true = amber light visible)
 }
 
 impl Vehicle {
@@ -128,6 +133,9 @@ impl Vehicle {
             intersection_distance: 0.0,
             intersection_physics_velocity: 0.0,
             distance_at_intersection_entry: 0.0,
+            turn_signal_active: false,
+            turn_signal_blink_timer: 0.0,
+            turn_signal_on: false,
         }
     }
 
@@ -220,6 +228,19 @@ impl Vehicle {
 
         if self.entered_intersection {
             self.time_in_intersection += dt;
+        }
+
+        // Blink the turn signal at ~2.5 Hz (period = 0.4 s)
+        const BLINK_PERIOD: f32 = 0.4;
+        if self.turn_signal_active {
+            self.turn_signal_blink_timer += dt;
+            if self.turn_signal_blink_timer >= BLINK_PERIOD {
+                self.turn_signal_blink_timer -= BLINK_PERIOD;
+                self.turn_signal_on = !self.turn_signal_on;
+            }
+        } else {
+            self.turn_signal_on = false;
+            self.turn_signal_blink_timer = 0.0;
         }
     }
 
@@ -483,6 +504,52 @@ impl Vehicle {
             pos_before_snap.0, pos_before_snap.1,
             self.position.0, self.position.1
         );
+    }
+
+    // ==================== Turn Animation & Signal Methods ====================
+
+    /// Begin rotating the sprite toward the post-turn heading as soon as the
+    /// vehicle enters the intersection box — before `apply_route_turn()` fires
+    /// at the snap point.  This ties the visual rotation to position rather than
+    /// to the discrete direction-change event.
+    pub fn begin_turn_animation(&mut self) {
+        if self.route_applied || self.route == Route::Straight {
+            return;
+        }
+        let final_dir = match (self.direction, self.route) {
+            (Direction::North, Route::Right) => Direction::East,
+            (Direction::North, Route::Left)  => Direction::West,
+            (Direction::South, Route::Right) => Direction::West,
+            (Direction::South, Route::Left)  => Direction::East,
+            (Direction::East,  Route::Right) => Direction::South,
+            (Direction::East,  Route::Left)  => Direction::North,
+            (Direction::West,  Route::Right) => Direction::North,
+            (Direction::West,  Route::Left)  => Direction::South,
+            _                                => return,
+        };
+        self.animation.set_direction(final_dir);
+    }
+
+    /// Activate the blinking turn signal (called from main when vehicle is
+    /// within TURN_SIGNAL_DISTANCE of the intersection and route ≠ Straight).
+    pub fn activate_turn_signal(&mut self) {
+        if !self.turn_signal_active {
+            self.turn_signal_active = true;
+            self.turn_signal_on = true; // immediately visible on first frame
+            self.turn_signal_blink_timer = 0.0;
+        }
+    }
+
+    /// Deactivate the turn signal (called when route_applied or out of range).
+    pub fn deactivate_turn_signal(&mut self) {
+        self.turn_signal_active = false;
+        self.turn_signal_on = false;
+        self.turn_signal_blink_timer = 0.0;
+    }
+
+    /// True during the "on" half of the blink cycle while the turn signal is active.
+    pub fn get_turn_signal_on(&self) -> bool {
+        self.turn_signal_on
     }
 
     // ==================== Physics Tracking Methods ====================

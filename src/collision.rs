@@ -1,10 +1,53 @@
 use crate::vehicle::{Vehicle, VelocityLevel, Route};
 use crate::intersection::{Intersection, Direction};
 use crate::statistics::Statistics;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
+use rayon::prelude::*;
+
+// ── Spatial grid for O(1) neighbour lookup in Passes 2 & 4 ─────────────────
+struct SpatialGrid {
+    cells: Vec<Vec<usize>>,
+    cell_size: f32,
+    cols: usize,
+    rows: usize,
+}
+
+impl SpatialGrid {
+    fn build(positions: &[(f32, f32)], cell_size: f32, world_w: f32, world_h: f32) -> Self {
+        let cols = ((world_w / cell_size).ceil() as usize).max(1);
+        let rows = ((world_h / cell_size).ceil() as usize).max(1);
+        let mut grid = SpatialGrid { cells: vec![Vec::new(); cols * rows], cell_size, cols, rows };
+        for (idx, &pos) in positions.iter().enumerate() {
+            let col = ((pos.0 / cell_size) as usize).min(cols - 1);
+            let row = ((pos.1 / cell_size) as usize).min(rows - 1);
+            grid.cells[row * cols + col].push(idx);
+        }
+        grid
+    }
+
+    /// All vehicle indices in the same and immediately neighbouring cells (1-cell radius).
+    fn candidates_near(&self, pos: (f32, f32)) -> Vec<usize> {
+        let col = ((pos.0 / self.cell_size) as i32).clamp(0, self.cols as i32 - 1);
+        let row = ((pos.1 / self.cell_size) as i32).clamp(0, self.rows as i32 - 1);
+        let mut out = Vec::new();
+        for dr in -1i32..=1 {
+            for dc in -1i32..=1 {
+                let c2 = col + dc;
+                let r2 = row + dr;
+                if c2 >= 0 && c2 < self.cols as i32 && r2 >= 0 && r2 < self.rows as i32 {
+                    out.extend_from_slice(
+                        &self.cells[(r2 as usize) * self.cols + c2 as usize],
+                    );
+                }
+            }
+        }
+        out
+    }
+}
 
 const SAFETY_DISTANCE_FAST: f32 = 120.0;  // same-lane following: beyond this → Fast
-const SAFETY_DISTANCE_STOP: f32 = 50.0;   // same-lane following: below this → Stopped (~vehicle body)
+const SAFETY_DISTANCE_SLOW: f32 = 80.0;   // same-lane following: below this  → Slow
+const SAFETY_DISTANCE_STOP: f32 = 50.0;   // same-lane following: below this  → Stopped (~vehicle body)
 // Planning horizon for the ATW algorithm (pixels beyond intersection boundary).
 const ETA_LOOKAHEAD: f32 = 1000.0;
 // Safety buffer added to both ends of each vehicle's crossing time window (seconds).
@@ -29,12 +72,28 @@ pub fn check_collisions_and_apply_strategy(
     statistics: &mut Statistics,
 ) {
     let n = vehicles.len();
+    if n == 0 { return; }
     let fast_vel = VelocityLevel::Fast.to_pixels_per_frame();
+
+    // ── Snapshot positions once — avoids repeated getter calls across all passes.
+    let positions: Vec<(f32, f32)> = vehicles.iter().map(|v| v.get_position()).collect();
 
     // Snapshot velocity levels before any pass modifies them.
     // Pass 3 hysteresis compares against this snapshot, not against whatever
     // Pass 1 just wrote, so the two passes are independent.
     let prev_levels: Vec<VelocityLevel> = vehicles.iter().map(|v| v.get_velocity_level()).collect();
+
+    // ── Precompute time windows at current velocity ────────────────────────
+    // Cached entry times used as the Pass 1 priority sort key and reused in
+    // Pass 2 conflict detection — avoids calling compute_time_window twice.
+    let precomp_windows: Vec<(f32, f32)> = vehicles.iter().zip(positions.iter()).map(|(v, &pos)| {
+        if v.is_route_applied() { return (f32::MAX, f32::MAX); }
+        if !is_in_or_near_intersection(pos, intersection, ETA_LOOKAHEAD) { return (f32::MAX, f32::MAX); }
+        let vel = v.get_velocity();
+        if vel <= 0.0 { return (f32::MAX, f32::MAX); }
+        compute_time_window(pos, v.get_direction(), v.get_route(), vel,
+                            intersection.contains_point(pos), intersection)
+    }).collect();
 
     // ─────────────────────────────────────────────────────────────────────────
     // Pass 1 — Arrival-Time-Window (ATW) velocity modulation
@@ -66,22 +125,11 @@ pub fn check_collisions_and_apply_strategy(
     // producing a continuous deceleration curve with no abrupt stop/go.
     // ─────────────────────────────────────────────────────────────────────────
 
-    // 1a. Compute raw t_entry at current speed (sort key only; not written back).
-    let raw_t_entry: Vec<f32> = vehicles.iter().map(|v| {
-        if v.is_route_applied() { return f32::MAX; }
-        let pos = v.get_position();
-        if !is_in_or_near_intersection(pos, intersection, ETA_LOOKAHEAD) { return f32::MAX; }
-        let vel = v.get_velocity();
-        if vel <= 0.0 { return f32::MAX; }
-        let in_isect = intersection.contains_point(pos);
-        compute_time_window(pos, v.get_direction(), v.get_route(), vel, in_isect, intersection).0
-    }).collect();
-
-    // 1b. Sort vehicle indices by ascending t_entry.
+    // 1a. Sort vehicle indices by ascending precomputed t_entry.
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
-        raw_t_entry[a]
-            .partial_cmp(&raw_t_entry[b])
+        precomp_windows[a].0
+            .partial_cmp(&precomp_windows[b].0)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| vehicles[a].get_id().cmp(&vehicles[b].get_id()))
     });
@@ -92,7 +140,7 @@ pub fn check_collisions_and_apply_strategy(
 
     // 1c. Process vehicles in priority order (highest first).
     for &i in &order {
-        let pos_i = vehicles[i].get_position();
+        let pos_i = positions[i];
 
         // Exited or outside planning horizon → free-running at Fast.
         if vehicles[i].is_route_applied()
@@ -148,133 +196,214 @@ pub fn check_collisions_and_apply_strategy(
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 2 — Close-call detection
+    // Pass 2 — Close-call detection  (spatially pre-filtered + parallel)
     //
     // When two vehicles with crossing paths come within SAFETY_DISTANCE_STOP
     // of each other without actually colliding, record a close call.
     // No velocity modification here — all speed decisions belong to Pass 1.
+    //
+    // Optimisation: only vehicles that are already near the intersection box
+    // can produce close calls.  We pre-filter once, then run O(k²) pair checks
+    // over that small subset (k << n) in parallel via rayon.
     // ─────────────────────────────────────────────────────────────────────────
-    let mut current_close_call_pairs: HashSet<(u32, u32)> = HashSet::new();
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let v1_pos = vehicles[i].get_position();
-            let v2_pos = vehicles[j].get_position();
-            if !is_in_or_near_intersection(v1_pos, intersection, INTERSECTION_PADDING) { continue; }
-            if !is_in_or_near_intersection(v2_pos, intersection, INTERSECTION_PADDING) { continue; }
-            if vehicles[i].is_route_applied() || vehicles[j].is_route_applied() { continue; }
+    let near_isect: Vec<usize> = (0..n)
+        .filter(|&i| {
+            !vehicles[i].is_route_applied()
+                && is_in_or_near_intersection(positions[i], intersection, INTERSECTION_PADDING)
+        })
+        .collect();
 
-            let distance = ((v1_pos.0 - v2_pos.0).powi(2) + (v1_pos.1 - v2_pos.1).powi(2)).sqrt();
-            if !will_paths_conflict(
-                vehicles[i].get_direction(), vehicles[i].get_route(),
-                vehicles[j].get_direction(), vehicles[j].get_route(),
-            ) { continue; }
+    // Parallel pair detection — read-only; writes happen after the join.
+    // We reborrow vehicles/positions as immutable slices so the fat-pointer
+    // copies inside move closures satisfy rayon's Fn + Send + Sync bounds.
+    let current_close_call_pairs: HashSet<(u32, u32)> = {
+        let vslice = vehicles.as_slice();
+        let pslice = positions.as_slice();
+        near_isect
+            .par_iter()
+            .flat_map(|&i| {
+                let p_i  = pslice[i];
+                let di   = vslice[i].get_direction();
+                let ri   = vslice[i].get_route();
+                let id_i = vslice[i].get_id();
+                near_isect
+                    .iter()
+                    .filter(move |&&j| {
+                        if j <= i { return false; }
+                        let p_j = pslice[j];
+                        let dx = p_i.0 - p_j.0;
+                        let dy = p_i.1 - p_j.1;
+                        let dist_sq = dx * dx + dy * dy;
+                        dist_sq < SAFETY_DISTANCE_STOP * SAFETY_DISTANCE_STOP
+                            && dist_sq >= VEHICLE_COLLISION_RADIUS * VEHICLE_COLLISION_RADIUS
+                            && will_paths_conflict(di, ri, vslice[j].get_direction(), vslice[j].get_route())
+                    })
+                    .map(move |&j| {
+                        let id_j = vslice[j].get_id();
+                        (id_i.min(id_j), id_i.max(id_j))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
 
-            if distance < SAFETY_DISTANCE_STOP && distance >= VEHICLE_COLLISION_RADIUS {
-                let id_a = vehicles[i].get_id();
-                let id_b = vehicles[j].get_id();
-                let pair = (id_a.min(id_b), id_a.max(id_b));
-                if !statistics.is_active_close_call(&pair) {
-                    eprintln!(
-                        "[CLOSE CALL] id={} & id={} dist={:.1} pos_a=({:.0},{:.0}) pos_b=({:.0},{:.0})",
-                        id_a, id_b, distance,
-                        v1_pos.0, v1_pos.1, v2_pos.0, v2_pos.1
-                    );
-                }
-                current_close_call_pairs.insert(pair);
-            }
+    // Log newly-activated pairs (serial, infrequent).
+    for &pair in &current_close_call_pairs {
+        if !statistics.is_active_close_call(&pair) {
+            let p_a = positions[vehicles.iter().position(|v| v.get_id() == pair.0).unwrap_or(0)];
+            let p_b = positions[vehicles.iter().position(|v| v.get_id() == pair.1).unwrap_or(0)];
+            let dx = p_a.0 - p_b.0; let dy = p_a.1 - p_b.1;
+            eprintln!(
+                "[CLOSE CALL] id={} & id={} dist={:.1} pos_a=({:.0},{:.0}) pos_b=({:.0},{:.0})",
+                pair.0, pair.1, (dx*dx+dy*dy).sqrt(), p_a.0, p_a.1, p_b.0, p_b.1
+            );
         }
     }
     statistics.update_close_calls(&current_close_call_pairs);
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Pass 3 — Same-lane safety distance (physical backstop)
+    // Pass 3 — Same-lane safety distance  (lane-grouped, O(n) + O(kg²))
     //
     // Enforce minimum following distances within same-lane queues.  ATW handles
     // intersection timing; this pass catches rear-end scenarios where a follower
     // closes on a leader before the intersection.
     //
-    // Distance buckets with hysteresis prevent oscillation at threshold edges.
-    // Virtual Buffering is intentionally absent: ATW committed windows already
-    // cascade delays down the queue without a separate VB mechanism.
+    // Optimisation: group vehicles by (direction, lane) first.  Only pairs in
+    // the same group can conflict — this reduces comparisons from O(n²) to
+    // O(n + Σ kg²) where kg is the typical group size (≈ n / 12 for 4 dirs ×
+    // 3 lanes).  For each follower we track the closest ahead leader so the
+    // closest-leader constraint is respected exactly.
     // ─────────────────────────────────────────────────────────────────────────
+    let mut lane_groups: HashMap<(Direction, u32), Vec<usize>> = HashMap::new();
     for i in 0..n {
-        let v_i_pos  = vehicles[i].get_position();
-        let v_i_dir  = vehicles[i].get_direction();
-        let v_i_lane = vehicles[i].get_assigned_lane();
+        lane_groups
+            .entry((vehicles[i].get_direction(), vehicles[i].get_assigned_lane()))
+            .or_default()
+            .push(i);
+    }
 
-        for j in 0..n {
-            if i == j { continue; }
-
-            let v_j_pos  = vehicles[j].get_position();
-            let v_j_dir  = vehicles[j].get_direction();
-            let v_j_lane = vehicles[j].get_assigned_lane();
-
-            if v_i_dir != v_j_dir || v_i_lane != v_j_lane { continue; }
-
-            let distance = ((v_i_pos.0 - v_j_pos.0).powi(2) + (v_i_pos.1 - v_j_pos.1).powi(2)).sqrt();
-            let is_ahead = match v_i_dir {
-                Direction::North => v_j_pos.1 < v_i_pos.1,
-                Direction::South => v_j_pos.1 > v_i_pos.1,
-                Direction::East  => v_j_pos.0 > v_i_pos.0,
-                Direction::West  => v_j_pos.0 < v_i_pos.0,
-            };
-
-            if is_ahead && distance <= SAFETY_DISTANCE_FAST {
-                let cur = prev_levels[i];
-                let new_level = if distance < SAFETY_DISTANCE_STOP {
-                    VelocityLevel::Stopped
-                } else if distance < SAFETY_DISTANCE_FAST
-                    - if cur == VelocityLevel::Fast { 5.0 } else { 0.0 }
-                {
-                    VelocityLevel::Normal
-                } else {
-                    cur
+    // Collect updates first to avoid conflicting mutable borrows while iterating.
+    let mut p3_updates: Vec<(usize, VelocityLevel)> = Vec::new();
+    for (_, group) in &lane_groups {
+        for &i in group {
+            let pos_i = positions[i];
+            let dir_i = vehicles[i].get_direction();
+            // Find the closest ahead vehicle in this lane group.
+            let mut min_dist  = f32::MAX;
+            let mut best_dist = f32::MAX;
+            for &j in group {
+                if i == j { continue; }
+                let pos_j = positions[j];
+                let is_ahead = match dir_i {
+                    Direction::North => pos_j.1 < pos_i.1,
+                    Direction::South => pos_j.1 > pos_i.1,
+                    Direction::East  => pos_j.0 > pos_i.0,
+                    Direction::West  => pos_j.0 < pos_i.0,
                 };
-                if prev_levels[i] != new_level {
-                    eprintln!(
-                        "[COL P3] id={} dir={:?} lane={} too close to id={} dist={:.1} {:?}->{:?}",
-                        vehicles[i].get_id(), v_i_dir, v_i_lane,
-                        vehicles[j].get_id(), distance,
-                        prev_levels[i], new_level
-                    );
-                }
-                vehicles[i].set_velocity_level(new_level);
+                if !is_ahead { continue; }
+                let dx = pos_i.0 - pos_j.0;
+                let dy = pos_i.1 - pos_j.1;
+                let d  = (dx * dx + dy * dy).sqrt();
+                if d < min_dist { min_dist = d; best_dist = d; }
             }
+            if best_dist > SAFETY_DISTANCE_FAST { continue; }
+            let distance = best_dist;
+            let cur = prev_levels[i];
+            // Hysteresis bands (Fast→hysteresis extends upward by 5 px):
+            //   < STOP  (50)  → Stopped
+            //   < SLOW  (80)  → Slow
+            //   < FAST (120)  → Normal   (with extra hysteresis when coming from Fast)
+            //   otherwise     → keep current
+            let fast_hyst = if cur == VelocityLevel::Fast { 5.0 } else { 0.0 };
+            let new_level = if distance < SAFETY_DISTANCE_STOP {
+                VelocityLevel::Stopped
+            } else if distance < SAFETY_DISTANCE_SLOW {
+                VelocityLevel::Slow
+            } else if distance < SAFETY_DISTANCE_FAST - fast_hyst {
+                VelocityLevel::Normal
+            } else {
+                cur
+            };
+            // Always write when a closer leader is in range — this overrides
+            // whatever Pass 1 set (e.g. Fast → Normal for queue followers).
+            if new_level != prev_levels[i] {
+                eprintln!(
+                    "[COL P3] id={} dir={:?} lane={} closest_ahead dist={:.1} {:?}->{:?}",
+                    vehicles[i].get_id(), dir_i, vehicles[i].get_assigned_lane(),
+                    distance, prev_levels[i], new_level
+                );
+            }
+            p3_updates.push((i, new_level));
         }
     }
+    for (i, level) in p3_updates {
+        vehicles[i].set_velocity_level(level);
+    }
 
-    // --- Pass 4: hard collision detection ---
-    // Scan every pair.  If two vehicle centres are closer than VEHICLE_COLLISION_RADIUS
-    // they have physically overlapped — ATW failed to keep them apart.  Hard-stop both
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pass 4 — Hard collision detection  (spatial grid + parallel)
+    //
+    // If two vehicle centres are closer than VEHICLE_COLLISION_RADIUS they have
+    // physically overlapped — ATW failed to keep them apart.  Hard-stop both
     // vehicles immediately and record the event in statistics.
-    let mut current_collision_pairs: HashSet<(u32, u32)> = HashSet::new();
-    for i in 0..vehicles.len() {
-        for j in (i + 1)..vehicles.len() {
-            let v1_pos = vehicles[i].get_position();
-            let v2_pos = vehicles[j].get_position();
-            let distance = ((v1_pos.0 - v2_pos.0).powi(2) + (v1_pos.1 - v2_pos.1).powi(2)).sqrt();
+    //
+    // Optimisation: build a uniform spatial grid (cell size = 2 × collision
+    // radius).  Each vehicle only checks its 3×3 neighbourhood — O(1) per
+    // vehicle, O(n) total.  Pair detection runs in parallel via rayon;
+    // hard-stop writes happen serially after the join to avoid data races.
+    // ─────────────────────────────────────────────────────────────────────────
+    const WORLD_W: f32 = 1400.0;
+    const WORLD_H: f32 = 900.0;
+    let grid = SpatialGrid::build(&positions, VEHICLE_COLLISION_RADIUS * 2.0, WORLD_W, WORLD_H);
 
-            if distance < VEHICLE_COLLISION_RADIUS {
-                let id_a = vehicles[i].get_id();
-                let id_b = vehicles[j].get_id();
-                let pair = (id_a.min(id_b), id_a.max(id_b));
+    // Parallel detection — only reads positions and vehicle IDs.
+    // Reborrow as immutable slices so fat-pointer copies in move closures work.
+    let collision_pairs: HashSet<(u32, u32)> = {
+        let vslice = vehicles.as_slice();
+        let pslice = positions.as_slice();
+        (0..n)
+            .into_par_iter()
+            .flat_map(|i| {
+                let pos_i = pslice[i];
+                let id_i  = vslice[i].get_id();
+                let r2    = VEHICLE_COLLISION_RADIUS * VEHICLE_COLLISION_RADIUS;
+                grid.candidates_near(pos_i)
+                    .into_iter()
+                    .filter(move |&j| {
+                        if j <= i { return false; }
+                        let pos_j = pslice[j];
+                        let dx = pos_i.0 - pos_j.0;
+                        let dy = pos_i.1 - pos_j.1;
+                        dx * dx + dy * dy < r2
+                    })
+                    .map(move |j| {
+                        let id_j = vslice[j].get_id();
+                        (id_i.min(id_j), id_i.max(id_j))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
 
-                if !statistics.is_active_collision(&pair) {
-                    eprintln!(
-                        "[COLLISION] id={} & id={} dist={:.1} pos_a=({:.0},{:.0}) pos_b=({:.0},{:.0})",
-                        id_a, id_b, distance,
-                        v1_pos.0, v1_pos.1, v2_pos.0, v2_pos.1
-                    );
-                }
-                current_collision_pairs.insert(pair);
-
-                // Hard-stop both vehicles to prevent further penetration.
-                vehicles[i].set_velocity_level(VelocityLevel::Stopped);
-                vehicles[j].set_velocity_level(VelocityLevel::Stopped);
-            }
+    // Serial write phase — log + hard-stop.
+    for &pair in &collision_pairs {
+        if !statistics.is_active_collision(&pair) {
+            let p_a = positions[vehicles.iter().position(|v| v.get_id() == pair.0).unwrap_or(0)];
+            let p_b = positions[vehicles.iter().position(|v| v.get_id() == pair.1).unwrap_or(0)];
+            let dx = p_a.0 - p_b.0; let dy = p_a.1 - p_b.1;
+            eprintln!(
+                "[COLLISION] id={} & id={} dist={:.1} pos_a=({:.0},{:.0}) pos_b=({:.0},{:.0})",
+                pair.0, pair.1, (dx*dx+dy*dy).sqrt(), p_a.0, p_a.1, p_b.0, p_b.1
+            );
         }
     }
-    statistics.update_collisions(&current_collision_pairs);
+    for v in vehicles.iter_mut() {
+        let id = v.get_id();
+        if collision_pairs.iter().any(|&(a, b)| a == id || b == id) {
+            v.set_velocity_level(VelocityLevel::Stopped);
+        }
+    }
+    statistics.update_collisions(&collision_pairs);
 }
 
 pub fn will_paths_conflict(dir1: Direction, route1: Route, dir2: Direction, route2: Route) -> bool {
@@ -489,12 +618,10 @@ mod tests {
         // Two North/Straight vehicles (same lane=1, since Straight → assigned_lane=1)
         // Leader at y=870 (far: |870-450|=420 > 400 → outside near zone)
         // Follower at y=920 (far: |920-450|=470 > 400 → outside near zone)
-        // Gap = 50px < SAFETY_DISTANCE_FAST (100.0) → safety distance enforcement must reduce follower
+        // Gap = 50px — within SAFETY_DISTANCE_SLOW (80px) → safety pass must reduce follower to Slow
         //
-        // BUG (current code): baseline runs LAST → resets follower to Fast after safety pass ran
-        // FIX (Task 4):        baseline runs FIRST → safety pass reduces follower from Fast to Normal
-        // Vehicle::new initializes velocity_level to Normal, so required_safety_distance=70.0 during
-        // the current (buggy) pass 3 — gap 50px < 70px triggers reduction, then baseline overrides to Fast.
+        // FIX (Task 4): baseline runs FIRST → safety pass reduces follower correctly; baseline cannot override.
+        // Gap 50 < SAFETY_DISTANCE_SLOW(80) → Slow tier.
         let mut leader   = Vehicle::new(0, Direction::North, Route::Straight);
         let mut follower  = Vehicle::new(1, Direction::North, Route::Straight);
         leader.set_position(700.0, 870.0);   // ahead (North moves toward smaller y, so leader has smaller y)
@@ -504,8 +631,8 @@ mod tests {
         check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
         assert_eq!(
             vehicles[1].get_velocity_level(),
-            VelocityLevel::Normal,
-            "follower within safety distance of leader must be reduced from Fast to Normal (no Slow level exists)"
+            VelocityLevel::Slow,
+            "follower 50px behind leader is within SAFETY_DISTANCE_SLOW (80px) → must be reduced to Slow"
         );
     }
 

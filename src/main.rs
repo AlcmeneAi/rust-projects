@@ -14,6 +14,7 @@ use sdl2::mouse::MouseButton;
 use sdl2::image::{self, InitFlag, LoadTexture};
 use std::time::{Duration, Instant};
 use vehicle::Vehicle;
+use vehicle::Route;
 use intersection::{Intersection, Direction};
 use renderer::{Renderer, CarTextures};
 use input::InputHandler;
@@ -103,6 +104,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if summary::point_in_ok_button(canvas_size, x, y) {
                             break 'running;
                         }
+                        if summary::point_in_restart_button(canvas_size, x, y) {
+                            // Reset everything and go back to Running
+                            vehicles.clear();
+                            statistics.reset();
+                            frame_count = 0;
+                            vehicle_counter = 0;
+                            total_time = 0.0;
+                            input_handler = InputHandler::new();
+                            state = AppState::Running;
+                        }
                     }
                     _ => {}
                 },
@@ -110,12 +121,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if state == AppState::Running {
-            if input_handler.should_generate_random() && frame_count % 30 == 0 {
+            if input_handler.should_generate_random() {
                 let direction = Direction::random();
-                let route = vehicle::Route::random();
-                let vehicle = Vehicle::new(vehicle_counter, direction, route);
-                vehicles.push(vehicle);
-                vehicle_counter += 1;
+                // Per-direction cooldown: skip if a vehicle was recently spawned
+                // from this direction to avoid vehicles spawning on top of each other.
+                if input_handler.poll_random_spawn(direction) {
+                    let route = vehicle::Route::random();
+                    let vehicle = Vehicle::new(vehicle_counter, direction, route);
+                    vehicles.push(vehicle);
+                    vehicle_counter += 1;
+                    statistics.increment_generated();
+                }
             }
 
             while let Some(direction) = input_handler.next_vehicle_request() {
@@ -123,11 +139,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let vehicle = Vehicle::new(vehicle_counter, direction, route);
                 vehicles.push(vehicle);
                 vehicle_counter += 1;
+                statistics.increment_generated();
             }
 
             let mut vehicles_to_remove = Vec::new();
 
             for (i, vehicle) in vehicles.iter_mut().enumerate() {
+                // ── Turn signal: activate within 200 px of entry edge for Left/Right ──
+                const TURN_SIGNAL_DISTANCE: f32 = 200.0;
+                if !vehicle.is_route_applied() && vehicle.get_route() != Route::Straight {
+                    let pos = vehicle.get_position();
+                    let half = intersection.size;
+                    let dist_to_entry = match vehicle.get_direction() {
+                        Direction::North => pos.1 - (intersection.center.1 + half),
+                        Direction::South => (intersection.center.1 - half) - pos.1,
+                        Direction::East  => (intersection.center.0 - half) - pos.0,
+                        Direction::West  => pos.0 - (intersection.center.0 + half),
+                    };
+                    if dist_to_entry > 0.0 && dist_to_entry <= TURN_SIGNAL_DISTANCE {
+                        vehicle.activate_turn_signal();
+                    } else {
+                        vehicle.deactivate_turn_signal();
+                    }
+                } else {
+                    vehicle.deactivate_turn_signal();
+                }
+
                 vehicle.update(dt);
 
                 // Entry: fire only when the vehicle has crossed into the intersection box.
@@ -135,6 +172,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     && !vehicle.has_entered_intersection()
                 {
                     vehicle.mark_intersection_entry(total_time);
+                    // Start rotating the sprite toward the final heading immediately
+                    // upon entry so the visual turn is tied to position, not to the
+                    // discrete snap event that fires mid-intersection.
+                    vehicle.begin_turn_animation();
                 }
 
                 if vehicle.should_apply_route_turn(intersection.center, intersection.size) {
@@ -176,12 +217,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             AppState::Running => {
                 renderer.clear();
                 renderer.draw_intersection(&intersection)?;
+                if debug_mode {
+                    renderer.draw_intersection_zones_debug(&intersection)?;
+                }
                 for vehicle in &vehicles {
                     renderer.draw_vehicle(vehicle, &car_textures)?;
                     if debug_mode {
-                        renderer.draw_vehicle_debug(vehicle)?;
+                        renderer.draw_vehicle_debug(vehicle, &vehicles, &intersection)?;
                     }
                 }
+                renderer.draw_hud(
+                    input_handler.is_random_generation_enabled(),
+                    vehicles.len(),
+                    debug_mode,
+                )?;
                 renderer.present();
             }
             AppState::Summary => {

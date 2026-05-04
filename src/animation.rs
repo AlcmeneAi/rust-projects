@@ -3,7 +3,7 @@ use crate::intersection::Direction;
 /// Represents the animation state of a vehicle
 #[derive(Clone, Debug)]
 pub struct AnimationState {
-    /// Current rotation angle in degrees (0-360)
+    /// Current rotation angle in degrees [0, 360)
     pub current_angle: f32,
     /// Target rotation angle in degrees
     pub target_angle: f32,
@@ -25,37 +25,30 @@ impl AnimationState {
         }
     }
 
-    /// Update the animation state based on delta time
+    /// Update the animation state based on delta time.
+    ///
+    /// Uses the true shortest arc so a transition from 270° (West) to 0° (North)
+    /// takes +90° (clockwise) rather than −270° (the long way around).
     pub fn update(&mut self, dt: f32) {
-        if (self.current_angle - self.target_angle).abs() > 0.1 {
-            // Calculate the shortest rotation path
-            let mut angle_diff = self.target_angle - self.current_angle;
-            
-            // Normalize angle difference to [-180, 180]
-            while angle_diff > 180.0 {
-                angle_diff -= 360.0;
-            }
-            while angle_diff < -180.0 {
-                angle_diff += 360.0;
-            }
-
+        let diff = shortest_angle_diff(self.current_angle, self.target_angle);
+        if diff.abs() > 0.1 {
             let max_rotation = self.rotation_speed * dt;
-            if angle_diff.abs() <= max_rotation {
+            if diff.abs() <= max_rotation {
                 self.current_angle = self.target_angle;
                 self.is_turning = false;
             } else {
-                self.current_angle += angle_diff.signum() * max_rotation;
+                self.current_angle += diff.signum() * max_rotation;
+                // Keep angle in [0, 360)
+                self.current_angle = self.current_angle.rem_euclid(360.0);
             }
-
-            // Keep angle in [0, 360) range
-            self.current_angle = self.current_angle.rem_euclid(360.0);
         }
     }
 
-    /// Set a new target direction for the vehicle
+    /// Set a new target direction for the vehicle.
+    /// Uses shortest-arc check so redundant calls (same direction) are no-ops.
     pub fn set_direction(&mut self, direction: Direction) {
         let new_angle = direction_to_angle(direction);
-        if (self.target_angle - new_angle).abs() > 0.1 {
+        if shortest_angle_diff(self.target_angle, new_angle).abs() > 0.1 {
             self.target_angle = new_angle;
             self.is_turning = true;
         }
@@ -65,6 +58,15 @@ impl AnimationState {
     pub fn get_angle(&self) -> f32 {
         self.current_angle
     }
+}
+
+/// Shortest signed arc from `from` to `to`, both in degrees.
+/// Returns a value in (−180, +180].  For example:
+///   270° → 0°: returns +90  (clockwise, not −270 the long way)
+///   0° → 270°: returns −90  (counter-clockwise)
+fn shortest_angle_diff(from: f32, to: f32) -> f32 {
+    let diff = (to - from).rem_euclid(360.0);
+    if diff > 180.0 { diff - 360.0 } else { diff }
 }
 
 /// Convert a Direction to a rotation angle in degrees

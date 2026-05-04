@@ -9,6 +9,7 @@ pub struct Statistics {
     active_close_call_pairs: HashSet<(u32, u32)>,
     collisions: u32,
     active_collision_pairs: HashSet<(u32, u32)>,
+    vehicles_generated: u32,
 }
 
 impl Statistics {
@@ -20,7 +21,29 @@ impl Statistics {
             active_close_call_pairs: HashSet::new(),
             collisions: 0,
             active_collision_pairs: HashSet::new(),
+            vehicles_generated: 0,
         }
+    }
+
+    /// Reset all counters and samples (used by Restart).
+    pub fn reset(&mut self) {
+        self.velocities.clear();
+        self.times.clear();
+        self.close_calls = 0;
+        self.active_close_call_pairs.clear();
+        self.collisions = 0;
+        self.active_collision_pairs.clear();
+        self.vehicles_generated = 0;
+    }
+
+    /// Increment the count of vehicles that have been spawned (called from main on spawn).
+    pub fn increment_generated(&mut self) {
+        self.vehicles_generated += 1;
+    }
+
+    /// Total number of vehicles ever spawned, including those still in-flight.
+    pub fn get_vehicles_generated(&self) -> u32 {
+        self.vehicles_generated
     }
 
     /// Records a single observation. Used by record_vehicle and by tests.
@@ -73,6 +96,18 @@ impl Statistics {
         if self.velocities.is_empty() { 0.0 } else { self.velocities_vec().mean() }
     }
 
+    pub fn get_median_velocity(&self) -> f32 {
+        if self.velocities.is_empty() { return 0.0; }
+        let mut sorted = self.velocities.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = sorted.len();
+        if n % 2 == 1 {
+            sorted[n / 2]
+        } else {
+            (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        }
+    }
+
     pub fn get_stddev_velocity(&self) -> f32 {
         if self.velocities.is_empty() { 0.0 } else { self.velocities_vec().variance().sqrt() }
     }
@@ -112,6 +147,21 @@ impl Statistics {
 
     pub fn get_collisions(&self) -> u32 {
         self.collisions
+    }
+
+    /// Returns a velocity histogram as an array of `BINS` counts over [0, max_vel].
+    /// `max_vel` is the upper bucket boundary (values ≥ max_vel go into the last bin).
+    pub fn get_velocity_histogram<const BINS: usize>(&self, max_vel: f32) -> [u32; BINS] {
+        let mut counts = [0u32; BINS];
+        if self.velocities.is_empty() || max_vel <= 0.0 {
+            return counts;
+        }
+        for &v in &self.velocities {
+            let bin = ((v / max_vel) * BINS as f32) as usize;
+            let bin = bin.min(BINS - 1);
+            counts[bin] += 1;
+        }
+        counts
     }
 }
 
