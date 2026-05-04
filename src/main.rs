@@ -44,10 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut renderer = Renderer::new(canvas, &texture_creator, WINDOW_WIDTH, WINDOW_HEIGHT)?;
     let car_textures = CarTextures {
-        north: texture_creator.load_texture("assets/car_up.png")?,
-        south: texture_creator.load_texture("assets/car_down.png")?,
-        east:  texture_creator.load_texture("assets/car_right.png")?,
-        west:  texture_creator.load_texture("assets/car_left.png")?,
+        base: texture_creator.load_texture("assets/car_up.png")?,
     };
     let mut input_handler = InputHandler::new();
     let mut event_pump = sdl_context.event_pump()?;
@@ -133,14 +130,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for (i, vehicle) in vehicles.iter_mut().enumerate() {
                 vehicle.update(dt);
 
-                if intersection.is_near_or_in(vehicle.get_position(), 50.0)
+                // Entry: fire only when the vehicle has crossed into the intersection box.
+                if intersection.contains_point(vehicle.get_position())
                     && !vehicle.has_entered_intersection()
                 {
                     vehicle.mark_intersection_entry(total_time);
                 }
 
-                if vehicle.should_apply_route_turn(intersection.center, 50.0) {
+                if vehicle.should_apply_route_turn(intersection.center, intersection.size) {
                     vehicle.apply_route_turn();
+                }
+
+                // Exit: fire as soon as the vehicle has turned *and* physically left the box.
+                // Recording here (not at off-screen removal) gives an accurate distance/time
+                // window limited to the actual intersection traversal.
+                if vehicle.has_entered_intersection()
+                    && !vehicle.has_exited_intersection()
+                    && vehicle.is_route_applied()
+                    && !intersection.contains_point(vehicle.get_position())
+                {
+                    vehicle.mark_intersection_exit(total_time);
+                    statistics.record_vehicle(vehicle);
                 }
 
                 let pos = vehicle.get_position();
@@ -276,6 +286,7 @@ fn print_console_summary(stats: &Statistics, total_time: f32) {
     println!("║  Session duration ......................  {:>7.2} s                 ║", total_time);
     println!("║  Vehicles passed .......................  {:>7}                   ║", stats.get_vehicle_count());
     println!("║  Close calls ...........................  {:>7}                   ║", stats.get_close_calls());
+    println!("║  Collisions ............................  {:>7}                   ║", stats.get_collisions());
     println!("╠── Velocity (px/s) ──────────────────────────────────────────────────╣");
     println!("║    min / mean / max ....................  {:>6.2} / {:>6.2} / {:>6.2}  ║",
         stats.get_min_velocity(), stats.get_mean_velocity(), stats.get_max_velocity());

@@ -15,298 +15,266 @@ const WINDOW_BUFFER_SECS: f32 = 0.3;
 const STOP_LINE_DISTANCE: f32 = 0.0;
 // Near zone used for close-call counting in Pass 2.
 const INTERSECTION_PADDING: f32 = 50.0;
-// Distance below which two crossing vehicles inside the intersection count as a close call.
-const CLOSE_CALL_DISTANCE: f32 = 60.0;
+// Half-width of the vehicle sprite used as the hard-collision radius (px).
+// Vehicles whose centres are closer than this are considered to have physically collided.
+const VEHICLE_COLLISION_RADIUS: f32 = 25.0;
 // Minimum speed enforced by ATW: vehicles always keep moving at at least this rate
 // so they never fully halt due to a computed target velocity (Pass 3 still stops them
 // on hard physical contact via SAFETY_DISTANCE_STOP).
 const CRAWL_SPEED: f32 = 20.0;
-// Approach zone thresholds: distance from intersection entry edge (pixels).
-// Yielding vehicles drop to Slow below CRAWL_ZONE; priority vehicles cap at Normal below SLOW_ZONE.
-const APPROACH_CRAWL_ZONE: f32 = 80.0;
-const APPROACH_SLOW_ZONE: f32 = 200.0;
 
 pub fn check_collisions_and_apply_strategy(
     vehicles: &mut Vec<Vehicle>,
     intersection: &Intersection,
     statistics: &mut Statistics,
 ) {
-    // Snapshot velocity levels BEFORE any pass modifies them so that Pass-3 transition
-    // prints compare against the true start-of-frame state, not Pass-1's overwrite.
+    let n = vehicles.len();
+    let fast_vel = VelocityLevel::Fast.to_pixels_per_frame();
+
+    // Snapshot velocity levels before any pass modifies them.
+    // Pass 3 hysteresis compares against this snapshot, not against whatever
+    // Pass 1 just wrote, so the two passes are independent.
     let prev_levels: Vec<VelocityLevel> = vehicles.iter().map(|v| v.get_velocity_level()).collect();
 
-    // Pass 1 — Closest-to-intersection wins:
-    // Each approaching vehicle checks all conflicting peers. Whoever is physically
-    // closer to the intersection entry edge has priority and proceeds at full speed.
-    // The farther vehicle yields by slowing down. Vehicles already inside always
-    // have top priority. Approach speed is graded: Fast → Normal as
-    // the vehicle enters the slow-down zone near the intersection.
-    for i in 0..vehicles.len() {
-        let pos_i    = vehicles[i].get_position();
-        let dir_i    = vehicles[i].get_direction();
-        let route_i  = vehicles[i].get_route();
-        let exited_i = vehicles[i].is_route_applied();
-        let in_isect_i = intersection.contains_point(pos_i);
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pass 1 — Arrival-Time-Window (ATW) velocity modulation
+    //
+    // Each approaching vehicle is assigned a target velocity such that it
+    // arrives at the intersection entry only *after* all conflicting higher-
+    // priority vehicles have cleared the box.
+    //
+    // Priority metric: earliest projected t_entry (first-come-first-served).
+    // Tie-breaking: lower vehicle ID wins (older vehicle has priority).
+    //
+    // For each vehicle processed in priority order:
+    //   1. Find the latest committed exit time among already-scheduled
+    //      conflicting vehicles (the "blocking exit time").
+    //   2. Compute the target velocity that makes the vehicle arrive at the
+    //      entry edge exactly after all blockers have cleared:
+    //
+    //         target = dist_to_entry / (blocking_exit_t + WINDOW_BUFFER_SECS)
+    //         target = clamp(target, CRAWL_SPEED, Fast)
+    //
+    //   3. Apply via set_modulated_velocity — a continuous value, never a
+    //      coarse step.  Vehicles never fully stop due to ATW alone.
+    //   4. Record the vehicle's committed window at the assigned velocity so
+    //      subsequent (lower-priority) vehicles see an accurate clearing time.
+    //
+    // Predictive braking is emergent: as a vehicle closes on the intersection
+    // with an active blocker, dist shrinks each frame while the blocker exit
+    // time stays roughly constant → target velocity decreases smoothly,
+    // producing a continuous deceleration curve with no abrupt stop/go.
+    // ─────────────────────────────────────────────────────────────────────────
 
-        // Already turned / outside planning horizon → free speed.
-        if exited_i || !is_in_or_near_intersection(pos_i, intersection, ETA_LOOKAHEAD) {
+    // 1a. Compute raw t_entry at current speed (sort key only; not written back).
+    let raw_t_entry: Vec<f32> = vehicles.iter().map(|v| {
+        if v.is_route_applied() { return f32::MAX; }
+        let pos = v.get_position();
+        if !is_in_or_near_intersection(pos, intersection, ETA_LOOKAHEAD) { return f32::MAX; }
+        let vel = v.get_velocity();
+        if vel <= 0.0 { return f32::MAX; }
+        let in_isect = intersection.contains_point(pos);
+        compute_time_window(pos, v.get_direction(), v.get_route(), vel, in_isect, intersection).0
+    }).collect();
+
+    // 1b. Sort vehicle indices by ascending t_entry.
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        raw_t_entry[a]
+            .partial_cmp(&raw_t_entry[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| vehicles[a].get_id().cmp(&vehicles[b].get_id()))
+    });
+
+    // committed[i] = the intersection-occupancy window guaranteed for vehicle i
+    // after its ATW velocity has been assigned in this frame.
+    let mut committed: Vec<Option<(f32, f32)>> = vec![None; n];
+
+    // 1c. Process vehicles in priority order (highest first).
+    for &i in &order {
+        let pos_i = vehicles[i].get_position();
+
+        // Exited or outside planning horizon → free-running at Fast.
+        if vehicles[i].is_route_applied()
+            || !is_in_or_near_intersection(pos_i, intersection, ETA_LOOKAHEAD)
+        {
             vehicles[i].set_velocity_level(VelocityLevel::Fast);
             continue;
         }
 
-        // Inside the intersection and not yet turned → Normal speed, highest priority.
-        if in_isect_i {
+        let dir_i   = vehicles[i].get_direction();
+        let route_i = vehicles[i].get_route();
+
+        // Inside the intersection: absolute highest priority, hold at Normal.
+        if intersection.contains_point(pos_i) {
             vehicles[i].set_velocity_level(VelocityLevel::Normal);
+            let v = VelocityLevel::Normal.to_pixels_per_frame();
+            committed[i] = Some(compute_time_window(pos_i, dir_i, route_i, v, true, intersection));
             continue;
         }
 
+        // Approaching: find the latest committed exit time of any conflicting peer.
         let dist_i = dist_to_entry_edge(pos_i, dir_i, intersection);
-        let my_id  = vehicles[i].get_id();
-
-        // Check all conflicting peers — yield if any peer is closer (or inside).
-        let mut must_yield = false;
-        for j in 0..vehicles.len() {
+        let mut blocking_exit_t = f32::NEG_INFINITY;
+        for j in 0..n {
             if i == j { continue; }
-            if vehicles[j].is_route_applied() { continue; }
-
-            let pos_j      = vehicles[j].get_position();
-            let dir_j      = vehicles[j].get_direction();
-            let route_j    = vehicles[j].get_route();
-            let in_isect_j = intersection.contains_point(pos_j);
-
-            if !is_in_or_near_intersection(pos_j, intersection, ETA_LOOKAHEAD) { continue; }
-            if !will_paths_conflict(dir_i, route_i, dir_j, route_j) { continue; }
-
-            // Any vehicle already inside has absolute priority.
-            if in_isect_j {
-                must_yield = true;
-                break;
+            let Some(w_j) = committed[j] else { continue };
+            if !will_paths_conflict(dir_i, route_i, vehicles[j].get_direction(), vehicles[j].get_route()) {
+                continue;
             }
-
-            let dist_j = dist_to_entry_edge(pos_j, dir_j, intersection);
-            let j_id   = vehicles[j].get_id();
-
-            // j is closer (or equal distance with lower ID) → i must yield.
-            if dist_j < dist_i || (dist_j == dist_i && j_id < my_id) {
-                must_yield = true;
-                break;
+            if w_j.1 > blocking_exit_t {
+                blocking_exit_t = w_j.1;
             }
         }
 
-        let new_level = if must_yield {
-            // Yield: slow more the closer we are to the entry.
-            if dist_i < APPROACH_CRAWL_ZONE {
-                VelocityLevel::Slow
-            } else {
-                VelocityLevel::Normal
-            }
+        // Derive target velocity from the blocking window.
+        let target_vel = if blocking_exit_t <= 0.0 {
+            // No active blocker, or all conflicts already cleared → full speed.
+            fast_vel
+        } else if dist_i <= 0.0 {
+            // Right at the entry edge with a live blocker → crawl.
+            CRAWL_SPEED
         } else {
-            // Has priority: grade approach speed as we near the intersection.
-            if dist_i < APPROACH_SLOW_ZONE {
-                VelocityLevel::Normal
-            } else {
-                VelocityLevel::Fast
-            }
+            // Arrive at the entry edge only after blocking_exit_t + buffer.
+            let raw = dist_i / (blocking_exit_t + WINDOW_BUFFER_SECS);
+            raw.clamp(CRAWL_SPEED, fast_vel)
         };
-        vehicles[i].set_velocity_level(new_level);
+
+        vehicles[i].set_modulated_velocity(target_vel);
+
+        // Commit the window at the just-assigned velocity so lower-priority
+        // vehicles downstream see this vehicle's realistic clearing time.
+        committed[i] = Some(compute_time_window(pos_i, dir_i, route_i, target_vel, false, intersection));
     }
 
-    // Pass 2: reduce velocity for at-risk pairs — set Normal for conflicting vehicles;
-    //         damp relative velocity for non-conflicting pairs that are close together.
-    let mut collision_risks = Vec::new();
-    // Track currently-active close-call pairs so we count once per encounter, not once per frame.
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pass 2 — Close-call detection
+    //
+    // When two vehicles with crossing paths come within SAFETY_DISTANCE_STOP
+    // of each other without actually colliding, record a close call.
+    // No velocity modification here — all speed decisions belong to Pass 1.
+    // ─────────────────────────────────────────────────────────────────────────
     let mut current_close_call_pairs: HashSet<(u32, u32)> = HashSet::new();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let v1_pos = vehicles[i].get_position();
+            let v2_pos = vehicles[j].get_position();
+            if !is_in_or_near_intersection(v1_pos, intersection, INTERSECTION_PADDING) { continue; }
+            if !is_in_or_near_intersection(v2_pos, intersection, INTERSECTION_PADDING) { continue; }
+            if vehicles[i].is_route_applied() || vehicles[j].is_route_applied() { continue; }
+
+            let distance = ((v1_pos.0 - v2_pos.0).powi(2) + (v1_pos.1 - v2_pos.1).powi(2)).sqrt();
+            if !will_paths_conflict(
+                vehicles[i].get_direction(), vehicles[i].get_route(),
+                vehicles[j].get_direction(), vehicles[j].get_route(),
+            ) { continue; }
+
+            if distance < SAFETY_DISTANCE_STOP && distance >= VEHICLE_COLLISION_RADIUS {
+                let id_a = vehicles[i].get_id();
+                let id_b = vehicles[j].get_id();
+                let pair = (id_a.min(id_b), id_a.max(id_b));
+                if !statistics.is_active_close_call(&pair) {
+                    eprintln!(
+                        "[CLOSE CALL] id={} & id={} dist={:.1} pos_a=({:.0},{:.0}) pos_b=({:.0},{:.0})",
+                        id_a, id_b, distance,
+                        v1_pos.0, v1_pos.1, v2_pos.0, v2_pos.1
+                    );
+                }
+                current_close_call_pairs.insert(pair);
+            }
+        }
+    }
+    statistics.update_close_calls(&current_close_call_pairs);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pass 3 — Same-lane safety distance (physical backstop)
+    //
+    // Enforce minimum following distances within same-lane queues.  ATW handles
+    // intersection timing; this pass catches rear-end scenarios where a follower
+    // closes on a leader before the intersection.
+    //
+    // Distance buckets with hysteresis prevent oscillation at threshold edges.
+    // Virtual Buffering is intentionally absent: ATW committed windows already
+    // cascade delays down the queue without a separate VB mechanism.
+    // ─────────────────────────────────────────────────────────────────────────
+    for i in 0..n {
+        let v_i_pos  = vehicles[i].get_position();
+        let v_i_dir  = vehicles[i].get_direction();
+        let v_i_lane = vehicles[i].get_assigned_lane();
+
+        for j in 0..n {
+            if i == j { continue; }
+
+            let v_j_pos  = vehicles[j].get_position();
+            let v_j_dir  = vehicles[j].get_direction();
+            let v_j_lane = vehicles[j].get_assigned_lane();
+
+            if v_i_dir != v_j_dir || v_i_lane != v_j_lane { continue; }
+
+            let distance = ((v_i_pos.0 - v_j_pos.0).powi(2) + (v_i_pos.1 - v_j_pos.1).powi(2)).sqrt();
+            let is_ahead = match v_i_dir {
+                Direction::North => v_j_pos.1 < v_i_pos.1,
+                Direction::South => v_j_pos.1 > v_i_pos.1,
+                Direction::East  => v_j_pos.0 > v_i_pos.0,
+                Direction::West  => v_j_pos.0 < v_i_pos.0,
+            };
+
+            if is_ahead && distance <= SAFETY_DISTANCE_FAST {
+                let cur = prev_levels[i];
+                let new_level = if distance < SAFETY_DISTANCE_STOP {
+                    VelocityLevel::Stopped
+                } else if distance < SAFETY_DISTANCE_FAST
+                    - if cur == VelocityLevel::Fast { 5.0 } else { 0.0 }
+                {
+                    VelocityLevel::Normal
+                } else {
+                    cur
+                };
+                if prev_levels[i] != new_level {
+                    eprintln!(
+                        "[COL P3] id={} dir={:?} lane={} too close to id={} dist={:.1} {:?}->{:?}",
+                        vehicles[i].get_id(), v_i_dir, v_i_lane,
+                        vehicles[j].get_id(), distance,
+                        prev_levels[i], new_level
+                    );
+                }
+                vehicles[i].set_velocity_level(new_level);
+            }
+        }
+    }
+
+    // --- Pass 4: hard collision detection ---
+    // Scan every pair.  If two vehicle centres are closer than VEHICLE_COLLISION_RADIUS
+    // they have physically overlapped — ATW failed to keep them apart.  Hard-stop both
+    // vehicles immediately and record the event in statistics.
+    let mut current_collision_pairs: HashSet<(u32, u32)> = HashSet::new();
     for i in 0..vehicles.len() {
         for j in (i + 1)..vehicles.len() {
             let v1_pos = vehicles[i].get_position();
             let v2_pos = vehicles[j].get_position();
             let distance = ((v1_pos.0 - v2_pos.0).powi(2) + (v1_pos.1 - v2_pos.1).powi(2)).sqrt();
 
-            let v1_dir = vehicles[i].get_direction();
-            let v2_dir = vehicles[j].get_direction();
-            let v1_route = vehicles[i].get_route();
-            let v2_route = vehicles[j].get_route();
+            if distance < VEHICLE_COLLISION_RADIUS {
+                let id_a = vehicles[i].get_id();
+                let id_b = vehicles[j].get_id();
+                let pair = (id_a.min(id_b), id_a.max(id_b));
 
-            let v1_near = is_in_or_near_intersection(v1_pos, intersection, INTERSECTION_PADDING);
-            let v2_near = is_in_or_near_intersection(v2_pos, intersection, INTERSECTION_PADDING);
-
-            // Vehicles that have already completed their turn are out of the conflict
-                // zone — exclude them from both collision_risks and close-call detection.
-                let v1_exited = vehicles[i].is_route_applied();
-                let v2_exited = vehicles[j].is_route_applied();
-
-                if v1_near && v2_near {
-                if !v1_exited && !v2_exited && will_paths_conflict(v1_dir, v1_route, v2_dir, v2_route) {
-                    collision_risks.push((i, j, distance, true));
-                    // Only count as a close call when vehicles are genuinely dangerously close
-                    // and both are inside the intersection (not just approaching)
-                    let v1_in = intersection.contains_point(v1_pos);
-                    let v2_in = intersection.contains_point(v2_pos);
-                    if v1_in && v2_in && distance < CLOSE_CALL_DISTANCE {
-                        let id_a = vehicles[i].get_id();
-                        let id_b = vehicles[j].get_id();
-                        let pair = (id_a.min(id_b), id_a.max(id_b));
-                        // Print only on the first frame of each new encounter
-                        // (compare against previous frame's active set stored in statistics)
-                        if !statistics.is_active_close_call(&pair) {
-                            eprintln!(
-                                "[CLOSE CALL] id={} & id={} dist={:.1} pos_a=({:.0},{:.0}) pos_b=({:.0},{:.0})",
-                                id_a, id_b, distance,
-                                v1_pos.0, v1_pos.1, v2_pos.0, v2_pos.1
-                            );
-                        }
-                        current_close_call_pairs.insert(pair);
-                    }
-                } else if distance < 200.0 {
-                    collision_risks.push((i, j, distance, false));
+                if !statistics.is_active_collision(&pair) {
+                    eprintln!(
+                        "[COLLISION] id={} & id={} dist={:.1} pos_a=({:.0},{:.0}) pos_b=({:.0},{:.0})",
+                        id_a, id_b, distance,
+                        v1_pos.0, v1_pos.1, v2_pos.0, v2_pos.1
+                    );
                 }
+                current_collision_pairs.insert(pair);
+
+                // Hard-stop both vehicles to prevent further penetration.
+                vehicles[i].set_velocity_level(VelocityLevel::Stopped);
+                vehicles[j].set_velocity_level(VelocityLevel::Stopped);
             }
         }
     }
-
-    statistics.update_close_calls(&current_close_call_pairs);
-
-    // Pass 1 (ATW) already handles all intersection priority and stopping.
-    // Pass 2 here only damps relative velocity between non-conflicting close pairs
-    // as a secondary safety net.
-    for (i, j, _distance, is_conflicting) in collision_risks {
-        if !is_conflicting {
-            let relative_velocity = vehicles[i].get_velocity() - vehicles[j].get_velocity();
-            if relative_velocity > 5.0 {
-                let current_level = vehicles[i].get_velocity_level();
-                let new_level = match current_level {
-                    VelocityLevel::Stopped   => VelocityLevel::Stopped,
-                    VelocityLevel::Slow      => VelocityLevel::Slow,
-                    VelocityLevel::Custom(_) => current_level,  // already ATW-modulated
-                    VelocityLevel::Fast      => VelocityLevel::Normal,
-                    VelocityLevel::Normal    => VelocityLevel::Normal,
-                };
-                vehicles[i].set_velocity_level(new_level);
-            } else if relative_velocity < -5.0 {
-                let current_level = vehicles[j].get_velocity_level();
-                let new_level = match current_level {
-                    VelocityLevel::Stopped   => VelocityLevel::Stopped,
-                    VelocityLevel::Slow      => VelocityLevel::Slow,
-                    VelocityLevel::Custom(_) => current_level,  // already ATW-modulated
-                    VelocityLevel::Fast      => VelocityLevel::Normal,
-                    VelocityLevel::Normal    => VelocityLevel::Normal,
-                };
-                vehicles[j].set_velocity_level(new_level);
-            }
-        }
-    }
-
-    // --- Virtual Buffering: pre-compute effective ATW windows at post-Pass-1/2 velocities ---
-    // When Pass 1 slows a vehicle to resolve an intersection conflict its crossing window
-    // shifts later (larger eta_exit) at the reduced speed.  Storing these updated windows
-    // lets Pass 3 pre-emptively slow same-lane followers proportionally instead of waiting
-    // until the physical SAFETY_DISTANCE_FAST / SAFETY_DISTANCE_STOP thresholds are hit.
-    let effective_windows: Vec<Option<(f32, f32)>> = vehicles.iter().map(|v| {
-        if v.is_route_applied() { return None; }
-        let pos = v.get_position();
-        if !is_in_or_near_intersection(pos, intersection, ETA_LOOKAHEAD) { return None; }
-        let vel = v.get_velocity();
-        if vel <= 0.0 { return None; }
-        let in_isect = intersection.contains_point(pos);
-        Some(compute_time_window(pos, v.get_direction(), v.get_route(), vel, in_isect, intersection))
-    }).collect();
-
-    // Pass 3: enforce safety distance — reduce follower velocity when too close to leader.
-    // Use pure distance buckets so the follower velocity is always proportional to the
-    // gap, regardless of what Pass 1 set.  This prevents fast vehicles from drifting into
-    // stopped leaders because Pass 1 kept resetting them to Fast.
-    for i in 0..vehicles.len() {
-        let v_i_pos = vehicles[i].get_position();
-        let v_i_dir = vehicles[i].get_direction();
-        let v_i_lane = vehicles[i].get_assigned_lane();
-
-        for j in 0..vehicles.len() {
-            if i == j {
-                continue;
-            }
-
-            let v_j_pos = vehicles[j].get_position();
-            let v_j_dir = vehicles[j].get_direction();
-            let v_j_lane = vehicles[j].get_assigned_lane();
-
-            if v_i_dir == v_j_dir && v_i_lane == v_j_lane {
-                let distance = ((v_i_pos.0 - v_j_pos.0).powi(2) + (v_i_pos.1 - v_j_pos.1).powi(2)).sqrt();
-
-                let is_ahead = match v_i_dir {
-                    Direction::North => v_j_pos.1 < v_i_pos.1,
-                    Direction::South => v_j_pos.1 > v_i_pos.1,
-                    Direction::East => v_j_pos.0 > v_i_pos.0,
-                    Direction::West => v_j_pos.0 < v_i_pos.0,
-                };
-
-                // Use <= so vehicles exactly at the safety threshold are also caught
-                if is_ahead && distance <= SAFETY_DISTANCE_FAST {
-                    // Pick level purely from distance using hysteresis to avoid oscillation
-                    // at bucket boundaries.  The current level determines which direction
-                    // the threshold applies: we only step DOWN when distance drops 5px
-                    // below the bucket edge, and only step UP when it rises 5px above.
-                    let cur = prev_levels[i];
-                    let new_level = if distance < SAFETY_DISTANCE_STOP {
-                        VelocityLevel::Stopped
-                    } else if distance < SAFETY_DISTANCE_FAST - if cur == VelocityLevel::Fast { 5.0 } else { 0.0 } {
-                        VelocityLevel::Normal
-                    } else {
-                        // Far enough — let Pass 1 decide (don't override upward)
-                        cur
-                    };
-                    // Only log on transition — compare against the pre-pass snapshot so that
-                    // Pass-1's per-frame Fast reset doesn't register as a new transition.
-                    if prev_levels[i] != new_level {
-                        eprintln!(
-                            "[COL P3] id={} dir={:?} lane={} too close to id={} dist={:.1} {:?}->{:?}",
-                            vehicles[i].get_id(), v_i_dir, v_i_lane,
-                            vehicles[j].get_id(), distance,
-                            prev_levels[i], new_level
-                        );
-                    }
-                    vehicles[i].set_velocity_level(new_level);
-                }
-
-                // Virtual Buffering: propagate a slowed leader's updated crossing window to
-                // its follower.  Rather than waiting for a physical gap closure, i slows down
-                // proportionally so it arrives at the intersection only after j has cleared.
-                // This creates smooth cascading deceleration down the queue.
-                if is_ahead && !vehicles[i].is_route_applied() {
-                    if let Some(j_win) = effective_windows[j] {
-                        if is_in_or_near_intersection(v_i_pos, intersection, ETA_LOOKAHEAD) {
-                            // Re-read velocity each iteration: a previous j may have already
-                            // reduced it, so we always apply the tightest constraint.
-                            let i_vel  = vehicles[i].get_velocity();
-                            let i_dist = dist_to_entry_edge(v_i_pos, v_i_dir, intersection);
-                            let i_eta  = if i_vel > 0.0 { i_dist / i_vel } else { f32::MAX };
-                            // i would arrive before j clears the intersection — modulate.
-                            if i_eta < j_win.1 {
-                                let slow_vel   = VelocityLevel::Slow.to_pixels_per_frame();
-                                let target_vel = if i_dist > 0.0 {
-                                    i_dist / (j_win.1 + WINDOW_BUFFER_SECS)
-                                } else {
-                                    slow_vel
-                                };
-                                let clamped = target_vel.max(slow_vel);
-                                // Only slow down — never override a Stopped decision.
-                                if clamped < i_vel
-                                    && !matches!(vehicles[i].get_velocity_level(),
-                                        VelocityLevel::Stopped | VelocityLevel::Custom(_) if vehicles[i].get_velocity() <= CRAWL_SPEED)
-                                {
-                                    eprintln!(
-                                        "[VB P3] id={} vbuf vel {:.1}->{:.1} (leader={} j_exit={:.2})",
-                                        vehicles[i].get_id(), i_vel, clamped,
-                                        vehicles[j].get_id(), j_win.1
-                                    );
-                                    vehicles[i].set_modulated_velocity(clamped);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    statistics.update_collisions(&current_collision_pairs);
 }
 
 pub fn will_paths_conflict(dir1: Direction, route1: Route, dir2: Direction, route2: Route) -> bool {
@@ -543,10 +511,15 @@ mod tests {
 
     #[test]
     fn conflicting_vehicles_atw_priority_closer_proceeds_farther_stops() {
-        // North/Straight at (700,700): dist_to_entry=50px, eta=50/160=0.3125s
-        // East/Straight  at (400,450): dist_to_entry=100px, eta=100/160=0.625s
-        // Windows overlap (both short eta, crossing=400px) → North has lower eta → North proceeds,
-        // East stops.
+        // North/Straight at (700,700): dist_to_entry=50px
+        //   raw_t_entry = 50/160 - 0.3 = 0.0125s  (initial vel = Normal = 160)
+        // East/Straight  at (400,450): dist_to_entry=100px
+        //   raw_t_entry = 100/160 - 0.3 = 0.325s
+        //
+        // ATW processes North first (lower t_entry).  No committed conflicts → Fast (260).
+        // North committed exit_t = (50+400)/260 + 0.3 ≈ 2.031s.
+        // East finds North as blocker: target_vel = 100/(2.031+0.3) ≈ 42.9 px/s
+        //   → Custom(~42.9), above CRAWL_SPEED(20), below Slow(80).
         let mut north = Vehicle::new(0, Direction::North, Route::Straight);
         let mut east  = Vehicle::new(1, Direction::East, Route::Straight);
         north.set_position(700.0, 700.0);
@@ -554,8 +527,16 @@ mod tests {
         let mut vehicles = vec![north, east];
         let mut stats = Statistics::new();
         check_collisions_and_apply_strategy(&mut vehicles, &make_intersection(), &mut stats);
-        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Fast,    "North (closer) should proceed at Fast");
-        assert_eq!(vehicles[1].get_velocity_level(), VelocityLevel::Stopped, "East (farther) should stop and yield");
+        assert_eq!(vehicles[0].get_velocity_level(), VelocityLevel::Fast,
+            "North (closer / earlier t_entry) should proceed at Fast");
+        // East is ATW-modulated to a Custom velocity that arrives after North clears.
+        assert!(
+            matches!(vehicles[1].get_velocity_level(), VelocityLevel::Custom(_)),
+            "East should be ATW-modulated (Custom), got {:?}", vehicles[1].get_velocity_level()
+        );
+        let east_v = vehicles[1].get_velocity();
+        assert!(east_v >= 20.0 && east_v < 80.0,
+            "East ATW velocity should be in [CRAWL_SPEED, Slow), got {east_v:.2}");
     }
 
     // --- Public ATW API unit tests ---
@@ -583,16 +564,16 @@ mod tests {
     #[test]
     fn vehicle_time_window_approaching_vehicle() {
         // North/Straight at y=850: dist_to_entry = 850-(450+200) = 200px
-        // vel = Fast = 160 px/frame; crossing = 400px
-        // entry_t = 200/160 - 0.3 = 1.25 - 0.3 = 0.95
-        // exit_t  = (200+400)/160 + 0.3 = 3.75 + 0.3 = 4.05
+        // vel = Fast = 260 px/s (VelocityLevel::Fast); crossing = 400px
+        // entry_t = 200/260 - 0.3 ≈ 0.469
+        // exit_t  = (200+400)/260 + 0.3 ≈ 2.608
         let mut v = Vehicle::new(0, Direction::North, Route::Straight);
         v.set_position(700.0, 850.0);
         v.set_velocity_level(VelocityLevel::Fast);
         let (entry_t, exit_t) = vehicle_time_window(&v, &make_intersection());
-        let eps = 0.01;
-        assert!((entry_t - 0.95).abs() < eps, "entry_t={entry_t}");
-        assert!((exit_t  - 4.05).abs() < eps, "exit_t={exit_t}");
+        let eps = 0.001;
+        assert!((entry_t - (200.0_f32 / 260.0 - 0.3)).abs() < eps, "entry_t={entry_t}");
+        assert!((exit_t  - (600.0_f32 / 260.0 + 0.3)).abs() < eps, "exit_t={exit_t}");
     }
 
     #[test]

@@ -7,6 +7,8 @@ pub struct Statistics {
     times: Vec<f32>,
     close_calls: u32,
     active_close_call_pairs: HashSet<(u32, u32)>,
+    collisions: u32,
+    active_collision_pairs: HashSet<(u32, u32)>,
 }
 
 impl Statistics {
@@ -16,6 +18,8 @@ impl Statistics {
             times: Vec::new(),
             close_calls: 0,
             active_close_call_pairs: HashSet::new(),
+            collisions: 0,
+            active_collision_pairs: HashSet::new(),
         }
     }
 
@@ -91,6 +95,23 @@ impl Statistics {
 
     pub fn get_close_calls(&self) -> u32 {
         self.close_calls
+    }
+
+    pub fn is_active_collision(&self, pair: &(u32, u32)) -> bool {
+        self.active_collision_pairs.contains(pair)
+    }
+
+    pub fn update_collisions(&mut self, current: &HashSet<(u32, u32)>) {
+        for &pair in current {
+            if !self.active_collision_pairs.contains(&pair) {
+                self.collisions += 1;
+            }
+        }
+        self.active_collision_pairs = current.clone();
+    }
+
+    pub fn get_collisions(&self) -> u32 {
+        self.collisions
     }
 }
 

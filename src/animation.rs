@@ -20,7 +20,7 @@ impl AnimationState {
         AnimationState {
             current_angle: angle,
             target_angle: angle,
-            rotation_speed: 360.0, // Full rotation in 1 second
+            rotation_speed: 480.0, // 90° turn completes in ~0.19 s at 60 fps
             is_turning: false,
         }
     }

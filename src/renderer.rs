@@ -4,17 +4,17 @@ use sdl2::rect::Rect;
 use sdl2::pixels::Color;
 use nalgebra::Vector2;
 use crate::vehicle::Vehicle;
-use crate::intersection::{Intersection, Direction};
+use crate::intersection::Intersection;
 use crate::statistics::Statistics;
 use crate::glyphs::{glyph_for, text_width, Glyph, GLYPH_W, GLYPH_H, GLYPH_SPACING};
 use crate::summary::{window_origin, ok_button_rect, point_in_ok_button, WIN_W, WIN_H};
 
-/// Holds one texture per cardinal direction for car sprites.
+/// Holds a single north-facing (up) base sprite for car rendering.
+/// The sprite is rotated by the vehicle's current animation angle to produce
+/// smooth turning visuals in all four cardinal directions and between them.
 pub struct CarTextures<'a> {
-    pub north: Texture<'a>,
-    pub south: Texture<'a>,
-    pub east:  Texture<'a>,
-    pub west:  Texture<'a>,
+    /// `car_up.png` — north-facing sprite used as the rotation base (0° = up).
+    pub base: Texture<'a>,
 }
 
 pub struct Renderer {
@@ -398,14 +398,13 @@ impl Renderer {
         let h = 40u32;
         let dst = Rect::new(x - w as i32 / 2, y - h as i32 / 2, w, h);
 
-        let texture = match vehicle.get_direction() {
-            Direction::North => &textures.north,
-            Direction::South => &textures.south,
-            Direction::East  => &textures.east,
-            Direction::West  => &textures.west,
-        };
-
-        self.canvas.copy(texture, None, dst)
+        // Rotate the north-facing base sprite by the vehicle's interpolated animation
+        // angle (0° = North/up, 90° = East/right, etc.).  During a turn the angle
+        // smoothly interpolates between the old and new heading, giving the appearance
+        // of the car physically steering through the intersection.
+        let angle = vehicle.get_animation_angle() as f64;
+        let center = sdl2::rect::Point::new(w as i32 / 2, h as i32 / 2);
+        self.canvas.copy_ex(&textures.base, None, dst, angle, center, false, false)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         Ok(())

@@ -88,6 +88,7 @@ pub struct Vehicle {
     intersection_exit_time: f32,   // Time when vehicle left intersection (seconds)
     intersection_distance: f32,    // Distance traveled in intersection (pixels)
     intersection_physics_velocity: f32,  // Calculated velocity = distance / time
+    distance_at_intersection_entry: f32, // Odometer snapshot at intersection entry
 }
 
 impl Vehicle {
@@ -126,6 +127,7 @@ impl Vehicle {
             intersection_exit_time: 0.0,
             intersection_distance: 0.0,
             intersection_physics_velocity: 0.0,
+            distance_at_intersection_entry: 0.0,
         }
     }
 
@@ -224,7 +226,7 @@ impl Vehicle {
     fn enforce_lane_constraint_north(&mut self) {
         // Northbound: right (east) half of N/S road — x = 725, 775, 825
         let target_x = 725.0 + (self.assigned_lane as f32 * 50.0);
-        let tolerance = 20.0;
+        let tolerance = 10.0;
         if (self.position.0 - target_x).abs() > tolerance {
             eprintln!(
                 "[LANE-SNAP N] id={} lane={} x: {:.1} -> {:.1} (off {:.1})",
@@ -238,7 +240,7 @@ impl Vehicle {
     fn enforce_lane_constraint_south(&mut self) {
         // Southbound: left (west) half of N/S road — x = 675, 625, 575
         let target_x = 675.0 - (self.assigned_lane as f32 * 50.0);
-        let tolerance = 20.0;
+        let tolerance = 10.0;
         if (self.position.0 - target_x).abs() > tolerance {
             eprintln!(
                 "[LANE-SNAP S] id={} lane={} x: {:.1} -> {:.1} (off {:.1})",
@@ -252,7 +254,7 @@ impl Vehicle {
     fn enforce_lane_constraint_east(&mut self) {
         // Eastbound: bottom half of E/W road — y = 475, 525, 575
         let target_y = 475.0 + (self.assigned_lane as f32 * 50.0);
-        let tolerance = 20.0;
+        let tolerance = 10.0;
         if (self.position.1 - target_y).abs() > tolerance {
             eprintln!(
                 "[LANE-SNAP E] id={} lane={} y: {:.1} -> {:.1} (off {:.1})",
@@ -266,7 +268,7 @@ impl Vehicle {
     fn enforce_lane_constraint_west(&mut self) {
         // Westbound: top half of E/W road — y = 425, 375, 325
         let target_y = 425.0 - (self.assigned_lane as f32 * 50.0);
-        let tolerance = 20.0;
+        let tolerance = 10.0;
         if (self.position.1 - target_y).abs() > tolerance {
             eprintln!(
                 "[LANE-SNAP W] id={} lane={} y: {:.1} -> {:.1} (off {:.1})",
@@ -362,37 +364,63 @@ impl Vehicle {
         self.assigned_lane
     }
 
-    pub fn should_apply_route_turn(&self, intersection_center: (f32, f32), _threshold: f32) -> bool {
+    /// Returns true when this vehicle should execute its route turn (or, for Straight,
+    /// mark `route_applied`) this frame.
+    ///
+    /// * `intersection_center`    — center of the intersection box.
+    /// * `intersection_half_size` — half-side-length of the intersection box (i.e. `size`
+    ///   in `Intersection::new`).  Used to place the Straight trigger at the **exit
+    ///   boundary** of the intersection instead of the centre, so the ATW collision
+    ///   system stops managing the vehicle only after it has physically left the box.
+    ///
+    /// For Right / Left routes the trigger fires at the **perpendicular snap target**
+    /// (the exit-lane centre-line position), which is always inside the intersection.
+    /// A tiny margin `M` handles one-frame overshoot without introducing large snaps.
+    ///
+    /// Snap targets used by `apply_route_turn` (derived from lane geometry):
+    ///   North+Right→East  y=575   North+Left→West  y=425
+    ///   South+Left→East   y=475   South+Right→West y=325
+    ///   East+Right→South  x=575   East+Left→North  x=725
+    ///   West+Left→South   x=675   West+Right→North x=825
+    pub fn should_apply_route_turn(
+        &self,
+        intersection_center: (f32, f32),
+        intersection_half_size: f32,
+    ) -> bool {
         if self.route_applied {
             return false;
         }
-        // Fire when the vehicle has physically arrived at the snap-target position
-        // on the perpendicular axis, so the subsequent snap is a micro-correction (<5px).
-        // For Straight routes there is no snap, so we use the intersection centre line.
-        //
-        // Snap targets (matches apply_route_turn):
-        //   North+Right→East  snap y=575   North+Left→West  snap y=425
-        //   South+Left→East   snap y=475   South+Right→West snap y=325
-        //   East+Right→South  snap x=575   East+Left→North  snap x=725
-        //   West+Left→South   snap x=675   West+Right→North snap x=825
-        const M: f32 = 5.0; // tiny margin for one-frame overshoot
+        // Tiny margin (≈ one frame of travel at Normal speed) handles floating-point
+        // overshoot so a vehicle that crosses the trigger line by a pixel still fires.
+        const M: f32 = 5.0;
         match (self.direction, self.route) {
-            // Northbound: y decreasing from ~900 towards 0
+            // ── Northbound (y decreasing) ────────────────────────────────────────
             (Direction::North, Route::Right)    => self.position.1 <= 575.0 + M,
             (Direction::North, Route::Left)     => self.position.1 <= 425.0 + M,
-            (Direction::North, Route::Straight) => self.position.1 <= intersection_center.1 + M,
-            // Southbound: y increasing from ~0 towards 900
+            // Straight: fire at the north (exit) boundary of the intersection
+            (Direction::North, Route::Straight) =>
+                self.position.1 <= intersection_center.1 - intersection_half_size,
+
+            // ── Southbound (y increasing) ────────────────────────────────────────
             (Direction::South, Route::Left)     => self.position.1 >= 475.0 - M,
             (Direction::South, Route::Right)    => self.position.1 >= 325.0 - M,
-            (Direction::South, Route::Straight) => self.position.1 >= intersection_center.1 - M,
-            // Eastbound: x increasing from ~0 towards 1400
+            // Straight: fire at the south (exit) boundary
+            (Direction::South, Route::Straight) =>
+                self.position.1 >= intersection_center.1 + intersection_half_size,
+
+            // ── Eastbound (x increasing) ─────────────────────────────────────────
             (Direction::East, Route::Left)      => self.position.0 >= 725.0 - M,
             (Direction::East, Route::Right)     => self.position.0 >= 575.0 - M,
-            (Direction::East, Route::Straight)  => self.position.0 >= intersection_center.0 - M,
-            // Westbound: x decreasing from ~1400 towards 0
+            // Straight: fire at the east (exit) boundary
+            (Direction::East, Route::Straight)  =>
+                self.position.0 >= intersection_center.0 + intersection_half_size,
+
+            // ── Westbound (x decreasing) ─────────────────────────────────────────
             (Direction::West, Route::Left)      => self.position.0 <= 675.0 + M,
             (Direction::West, Route::Right)     => self.position.0 <= 825.0 + M,
-            (Direction::West, Route::Straight)  => self.position.0 <= intersection_center.0 + M,
+            // Straight: fire at the west (exit) boundary
+            (Direction::West, Route::Straight)  =>
+                self.position.0 <= intersection_center.0 - intersection_half_size,
         }
     }
 
@@ -465,6 +493,7 @@ impl Vehicle {
             self.entered_intersection = true;
             self.intersection_entry_time = current_time;
             self.intersection_entry_position = self.position;
+            self.distance_at_intersection_entry = self.distance_traveled;
         }
     }
 
@@ -479,10 +508,11 @@ impl Vehicle {
 
     /// Update physics calculations for the intersection traversal
     fn update_intersection_physics(&mut self) {
-        // Calculate distance traveled in intersection
-        let dx = self.position.0 - self.intersection_entry_position.0;
-        let dy = self.position.1 - self.intersection_entry_position.1;
-        self.intersection_distance = (dx * dx + dy * dy).sqrt();
+        // Calculate distance traveled through the intersection using the odometer
+        // (cumulative path distance) rather than straight-line entry→exit so that
+        // curved left/right turns are measured correctly.
+        self.intersection_distance =
+            (self.distance_traveled - self.distance_at_intersection_entry).max(0.0);
 
         // Calculate time spent in intersection
         let time_in_intersection = self.intersection_exit_time - self.intersection_entry_time;
