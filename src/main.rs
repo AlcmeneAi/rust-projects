@@ -172,10 +172,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     && !vehicle.has_entered_intersection()
                 {
                     vehicle.mark_intersection_entry(total_time);
-                    // Start rotating the sprite toward the final heading immediately
-                    // upon entry so the visual turn is tied to position, not to the
-                    // discrete snap event that fires mid-intersection.
-                    vehicle.begin_turn_animation();
                 }
 
                 if vehicle.should_apply_route_turn(intersection.center, intersection.size) {
