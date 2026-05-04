@@ -31,7 +31,7 @@ impl InputHandler {
             vehicle_requests: VecDeque::new(),
             random_generation_enabled: false,
             last_key_time: std::time::Instant::now(),
-            key_cooldown: std::time::Duration::from_millis(500),
+            key_cooldown: std::time::Duration::from_millis(200),
             last_spawn_time: [epoch; 4],
             // 3 s between spawns per direction — matches intersection throughput
             // (~0.8 vehicles/s capacity) so lanes don't back up over time.
@@ -41,15 +41,12 @@ impl InputHandler {
 
     pub fn request_vehicle_from_direction(&mut self, direction: Direction) {
         let now = std::time::Instant::now();
-        let idx = dir_index(direction);
-        // Both the global key-repeat cooldown *and* the per-direction spawn
-        // cooldown must have elapsed before the request is accepted.
-        if now.duration_since(self.last_key_time) >= self.key_cooldown
-            && now.duration_since(self.last_spawn_time[idx]) >= self.spawn_cooldown
-        {
+        // Only the global key-repeat cooldown applies to manual spawning.
+        // The per-direction spawn_cooldown is reserved for random generation
+        // so the user can deliberately queue 3 cars in the same lane.
+        if now.duration_since(self.last_key_time) >= self.key_cooldown {
             self.vehicle_requests.push_back(direction);
             self.last_key_time = now;
-            self.last_spawn_time[idx] = now;
         }
     }
 
